@@ -117,6 +117,36 @@ def _validate_scenarios(
 
     return tuple(normalized)
 
+def _validate_seeds(
+    seeds: tuple[int, ...],
+) -> tuple[int, ...]:
+    """Validate a non-empty sequence of unique random seeds."""
+    if not seeds:
+        raise ModelValidationError(
+            "At least one seed must be provided."
+        )
+
+    normalized: list[int] = []
+
+    for seed in seeds:
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ModelValidationError(
+                f"Each seed must be an integer. Received: {seed!r}"
+            )
+
+        if seed < 0:
+            raise ModelValidationError(
+                f"Each seed must be non-negative. Received: {seed}"
+            )
+
+        normalized.append(seed)
+
+    if len(set(normalized)) != len(normalized):
+        raise ModelValidationError(
+            "Seed identifiers must not be duplicated."
+        )
+
+    return tuple(normalized)
 
 def evaluate_realization(
     realization: SpatialRealization,
@@ -318,4 +348,320 @@ def evaluate_seed(
         seed=seed,
         realization=realization,
         scenario_evaluations=tuple(scenario_evaluations),
+    )
+
+def compare_seed_scenarios(
+    evaluation: SeedEvaluation,
+    tie_tolerance_s: float = 1.0e-9,
+) -> PairedComparison:
+    """Compare S1, S2, and S3 using maximum latency for one seed."""
+    if not isinstance(evaluation, SeedEvaluation):
+        raise ModelValidationError(
+            "evaluation must be an instance of SeedEvaluation."
+        )
+
+    tolerance = float(tie_tolerance_s)
+
+    if not math.isfinite(tolerance) or tolerance < 0.0:
+        raise ModelValidationError(
+            "tie_tolerance_s must be finite and non-negative."
+        )
+
+    maximum_latencies = {
+        scenario.scenario: scenario.summary.maximum_latency_s
+        for scenario in evaluation.scenario_evaluations
+    }
+
+    expected_scenarios = {"S1", "S2", "S3"}
+
+    if set(maximum_latencies) != expected_scenarios:
+        raise ModelValidationError(
+            "Paired comparison requires exactly S1, S2, and S3."
+        )
+
+    best_value = min(maximum_latencies.values())
+    worst_value = max(maximum_latencies.values())
+
+    scenario_order = ("S1", "S2", "S3")
+
+    best_scenarios = tuple(
+        scenario
+        for scenario in scenario_order
+        if abs(maximum_latencies[scenario] - best_value)
+        <= tolerance
+    )
+
+    worst_scenarios = tuple(
+        scenario
+        for scenario in scenario_order
+        if abs(maximum_latencies[scenario] - worst_value)
+        <= tolerance
+    )
+
+    s1 = maximum_latencies["S1"]
+    s2 = maximum_latencies["S2"]
+    s3 = maximum_latencies["S3"]
+
+    return PairedComparison(
+        seed=evaluation.seed,
+        s1_max_latency_s=s1,
+        s2_max_latency_s=s2,
+        s3_max_latency_s=s3,
+        s1_minus_s2_s=s1 - s2,
+        s1_minus_s3_s=s1 - s3,
+        s2_minus_s3_s=s2 - s3,
+        best_scenarios=best_scenarios,
+        worst_scenarios=worst_scenarios,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PairedComparison:
+    """Paired comparison of scenario maximum latencies for one seed."""
+
+    seed: int
+
+    s1_max_latency_s: float
+    s2_max_latency_s: float
+    s3_max_latency_s: float
+
+    s1_minus_s2_s: float
+    s1_minus_s3_s: float
+    s2_minus_s3_s: float
+
+    best_scenarios: tuple[str, ...]
+    worst_scenarios: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioSummary:
+    """Aggregate statistics across all spatial realizations."""
+
+    scenario: str
+    execution_tier: str
+
+    number_of_repetitions: int
+    number_of_uavs: int
+
+    mean_of_max_latency_s: float
+    median_of_max_latency_s: float
+    minimum_of_max_latency_s: float
+    maximum_of_max_latency_s: float
+    std_of_max_latency_s: float
+
+    confidence_interval_95_lower_s: float
+    confidence_interval_95_upper_s: float
+
+    mean_of_mean_latency_s: float
+    mean_of_min_latency_s: float
+    mean_latency_range_s: float
+
+    number_of_wins: int
+    number_of_ties: int
+    win_rate: float
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentResult:
+    """Complete result across multiple spatial realizations."""
+
+    seeds: tuple[int, ...]
+    seed_evaluations: tuple[SeedEvaluation, ...]
+    paired_comparisons: tuple[PairedComparison, ...]
+    scenario_summaries: tuple[ScenarioSummary, ...]
+
+
+
+def summarize_scenario_across_seeds(
+    seed_evaluations: tuple[SeedEvaluation, ...],
+    paired_comparisons: tuple[PairedComparison, ...],
+    scenario: str,
+) -> ScenarioSummary:
+    """Aggregate one scenario across all spatial realizations."""
+    if not seed_evaluations:
+        raise ModelValidationError(
+            "Cannot summarize an empty experiment."
+        )
+
+    definition = get_scenario_definition(scenario)
+
+    summaries: list[RepetitionSummary] = []
+
+    for evaluation in seed_evaluations:
+        matching = tuple(
+            scenario_evaluation.summary
+            for scenario_evaluation
+            in evaluation.scenario_evaluations
+            if scenario_evaluation.scenario == definition.scenario
+        )
+
+        if len(matching) != 1:
+            raise ModelValidationError(
+                "Each seed must contain exactly one summary "
+                f"for scenario {definition.scenario}."
+            )
+
+        summaries.append(matching[0])
+
+    repetition_count = len(summaries)
+
+    if len(paired_comparisons) != repetition_count:
+        raise ModelValidationError(
+            "Paired comparison count is inconsistent "
+            "with the number of repetitions."
+        )
+
+    number_of_uavs = summaries[0].number_of_uavs
+
+    if any(
+        summary.number_of_uavs != number_of_uavs
+        for summary in summaries
+    ):
+        raise ModelValidationError(
+            "All repetitions must use the same number of UAVs."
+        )
+
+    maximum_latencies = tuple(
+        summary.maximum_latency_s
+        for summary in summaries
+    )
+
+    mean_latencies = tuple(
+        summary.mean_latency_s
+        for summary in summaries
+    )
+
+    minimum_latencies = tuple(
+        summary.minimum_latency_s
+        for summary in summaries
+    )
+
+    latency_ranges = tuple(
+        summary.latency_range_s
+        for summary in summaries
+    )
+
+    mean_of_max = statistics.fmean(maximum_latencies)
+
+    if repetition_count > 1:
+        std_of_max = statistics.stdev(maximum_latencies)
+    else:
+        std_of_max = 0.0
+
+    confidence_half_width = (
+        1.96
+        * std_of_max
+        / math.sqrt(repetition_count)
+    )
+
+    number_of_wins = sum(
+        comparison.best_scenarios
+        == (definition.scenario,)
+        for comparison in paired_comparisons
+    )
+
+    number_of_ties = sum(
+        definition.scenario in comparison.best_scenarios
+        and len(comparison.best_scenarios) > 1
+        for comparison in paired_comparisons
+    )
+
+    return ScenarioSummary(
+        scenario=definition.scenario,
+        execution_tier=definition.execution_tier,
+        number_of_repetitions=repetition_count,
+        number_of_uavs=number_of_uavs,
+        mean_of_max_latency_s=mean_of_max,
+        median_of_max_latency_s=statistics.median(
+            maximum_latencies
+        ),
+        minimum_of_max_latency_s=min(maximum_latencies),
+        maximum_of_max_latency_s=max(maximum_latencies),
+        std_of_max_latency_s=std_of_max,
+        confidence_interval_95_lower_s=(
+            mean_of_max - confidence_half_width
+        ),
+        confidence_interval_95_upper_s=(
+            mean_of_max + confidence_half_width
+        ),
+        mean_of_mean_latency_s=statistics.fmean(
+            mean_latencies
+        ),
+        mean_of_min_latency_s=statistics.fmean(
+            minimum_latencies
+        ),
+        mean_latency_range_s=statistics.fmean(
+            latency_ranges
+        ),
+        number_of_wins=number_of_wins,
+        number_of_ties=number_of_ties,
+        win_rate=number_of_wins / repetition_count,
+    )
+
+def evaluate_experiment(
+    seeds: tuple[int, ...],
+    parameters: ExperimentParameters,
+    tie_tolerance_s: float = 1.0e-9,
+) -> ExperimentResult:
+    """Evaluate all configured scenarios across multiple seeds."""
+    validated_seeds = _validate_seeds(seeds)
+    validated_scenarios = _validate_scenarios(
+        parameters.scenarios
+    )
+
+    if validated_scenarios != ("S1", "S2", "S3"):
+        raise ModelValidationError(
+            "The complete experiment requires scenarios "
+            "in the order S1, S2, S3."
+        )
+
+    seed_evaluations = tuple(
+        evaluate_seed(
+            seed=seed,
+            parameters=parameters,
+        )
+        for seed in validated_seeds
+    )
+
+    paired_comparisons = tuple(
+        compare_seed_scenarios(
+            evaluation=evaluation,
+            tie_tolerance_s=tie_tolerance_s,
+        )
+        for evaluation in seed_evaluations
+    )
+
+    scenario_summaries = tuple(
+        summarize_scenario_across_seeds(
+            seed_evaluations=seed_evaluations,
+            paired_comparisons=paired_comparisons,
+            scenario=scenario,
+        )
+        for scenario in validated_scenarios
+    )
+
+    expected_evaluation_count = (
+        len(validated_seeds)
+        * parameters.number_of_uavs
+        * len(validated_scenarios)
+    )
+
+    observed_evaluation_count = sum(
+        len(scenario_evaluation.results)
+        for seed_evaluation in seed_evaluations
+        for scenario_evaluation
+        in seed_evaluation.scenario_evaluations
+    )
+
+    if observed_evaluation_count != expected_evaluation_count:
+        raise ModelValidationError(
+            "The experiment produced an unexpected number "
+            "of per-UAV evaluations."
+        )
+
+    return ExperimentResult(
+        seeds=validated_seeds,
+        seed_evaluations=seed_evaluations,
+        paired_comparisons=paired_comparisons,
+        scenario_summaries=scenario_summaries,
     )
