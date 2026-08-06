@@ -34,6 +34,65 @@ def _require_positive_finite(value: float, field_name: str) -> float:
 
     return converted
 
+def _require_non_negative_finite(
+    value: float,
+    field_name: str,
+) -> float:
+    """Validate a finite numeric value that may be zero."""
+    converted = float(value)
+
+    if not math.isfinite(converted) or converted < 0.0:
+        raise ModelValidationError(
+            f"{field_name} must be finite and non-negative. "
+            f"Received: {value!r}"
+        )
+
+    return converted
+
+
+def _require_positive_int(
+    value: int,
+    field_name: str,
+) -> int:
+    """Validate a strictly positive integer."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ModelValidationError(
+            f"{field_name} must be an integer. Received: {value!r}"
+        )
+
+    if value <= 0:
+        raise ModelValidationError(
+            f"{field_name} must be greater than zero. Received: {value}"
+        )
+
+    return value
+
+
+def _compute_equal_share(
+    total_resource: float,
+    number_of_shares: int,
+    field_name: str,
+) -> float:
+    """Divide one positive resource equally among concurrent users."""
+    total = _require_positive_finite(
+        total_resource,
+        field_name,
+    )
+
+    shares = _require_positive_int(
+        number_of_shares,
+        "number_of_shares",
+    )
+
+    result = total / shares
+
+    if not math.isfinite(result) or result <= 0.0:
+        raise ModelValidationError(
+            f"Equal sharing of {field_name} produced an invalid result."
+        )
+
+    return result
+
 
 def build_inference_workload(
     chunks_per_job: int,
@@ -280,3 +339,107 @@ def build_access_link_state(
         snr_linear=snr,
         rate_bps=rate,
     )
+def compute_bandwidth_per_uav(
+    total_bandwidth_hz: float,
+    number_of_uavs: int,
+) -> float:
+    """
+    Compute the equal access bandwidth assigned to each UAV.
+
+        B_n = B / N
+    """
+    return _compute_equal_share(
+        total_resource=total_bandwidth_hz,
+        number_of_shares=number_of_uavs,
+        field_name="total_bandwidth_hz",
+    )
+
+
+def compute_backhaul_rate_per_flow(
+    aggregate_capacity_bps: float,
+    number_of_uavs: int,
+) -> float:
+    """
+    Compute the equal SV-to-RCC backhaul rate assigned to each flow.
+
+        R_2 = C_bh / N
+    """
+    return _compute_equal_share(
+        total_resource=aggregate_capacity_bps,
+        number_of_shares=number_of_uavs,
+        field_name="aggregate_capacity_bps",
+    )
+
+
+def compute_remote_capacity_per_job(
+    total_capacity_cycles_s: float,
+    number_of_uavs: int,
+) -> float:
+    """
+    Compute the equal remote processing capacity assigned to each job.
+
+        f_eff = f_total / N
+    """
+    return _compute_equal_share(
+        total_resource=total_capacity_cycles_s,
+        number_of_shares=number_of_uavs,
+        field_name="total_capacity_cycles_s",
+    )
+
+
+def compute_transmission_time(
+    payload_bits: float,
+    rate_bps: float,
+) -> float:
+    """
+    Compute the transmission time of a payload.
+
+        t_tx = payload / rate
+    """
+    payload = _require_non_negative_finite(
+        payload_bits,
+        "payload_bits",
+    )
+
+    rate = _require_positive_finite(
+        rate_bps,
+        "rate_bps",
+    )
+
+    transmission_time = payload / rate
+
+    if not math.isfinite(transmission_time):
+        raise ModelValidationError(
+            "Transmission-time calculation produced an invalid result."
+        )
+
+    return transmission_time
+
+
+def compute_processing_time(
+    workload_cycles: float,
+    effective_capacity_cycles_s: float,
+) -> float:
+    """
+    Compute the processing time of an inference workload.
+
+        t_comp = W / f_eff
+    """
+    workload = _require_positive_finite(
+        workload_cycles,
+        "workload_cycles",
+    )
+
+    capacity = _require_positive_finite(
+        effective_capacity_cycles_s,
+        "effective_capacity_cycles_s",
+    )
+
+    processing_time = workload / capacity
+
+    if not math.isfinite(processing_time) or processing_time <= 0.0:
+        raise ModelValidationError(
+            "Processing-time calculation produced an invalid result."
+        )
+
+    return processing_time
