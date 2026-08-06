@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from ucc.geometry import UAVPosition
 from dataclasses import dataclass
 
 
@@ -672,3 +673,138 @@ def compute_latency_components(
         backhaul_fixed_delay_s=fixed_delay,
         end_to_end_latency_s=end_to_end_latency,
     )
+@dataclass(frozen=True, slots=True)
+class UAVScenarioResult:
+    """Complete result for one UAV under one execution scenario."""
+
+    seed: int
+    scenario: str
+    execution_tier: str
+    uav_id: int
+
+    x_m: float
+    y_m: float
+    altitude_m: float
+    distance_to_sv_m: float
+
+    channel_gain_linear: float
+    snr_linear: float
+    access_rate_bps: float
+    backhaul_rate_bps: float
+
+    input_payload_bits: float
+    output_payload_bits: float
+    workload_cycles: float
+
+    access_payload_bits: float
+    backhaul_payload_bits: float
+    effective_compute_capacity_cycles_s: float
+
+    access_time_s: float
+    compute_time_s: float
+    backhaul_transmission_time_s: float
+    backhaul_fixed_delay_s: float
+
+    end_to_end_latency_s: float
+def evaluate_uav_scenario(
+    seed: int,
+    scenario: str,
+    position: UAVPosition,
+    reference_distance_m: float,
+    reference_gain_linear: float,
+    transmit_power_w: float,
+    noise_psd_w_hz: float,
+    allocated_bandwidth_hz: float,
+    backhaul_rate_bps: float,
+    input_payload_bits: float,
+    output_payload_bits: float,
+    workload_cycles: float,
+    uav_capacity_cycles_s: float,
+    sv_capacity_cycles_s: float,
+    rcc_capacity_cycles_s: float,
+    number_of_uavs: int,
+    backhaul_fixed_delay_s: float,
+) -> UAVScenarioResult:
+    """Evaluate one UAV under one homogeneous execution scenario."""
+    if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+        raise ModelValidationError(
+            f"seed must be a non-negative integer. Received: {seed!r}"
+        )
+
+    if not isinstance(position, UAVPosition):
+        raise ModelValidationError(
+            "position must be an instance of UAVPosition."
+        )
+
+    link_state = build_access_link_state(
+        uav_id=position.uav_id,
+        distance_m=position.distance_to_sv_m,
+        reference_distance_m=reference_distance_m,
+        reference_gain_linear=reference_gain_linear,
+        transmit_power_w=transmit_power_w,
+        noise_psd_w_hz=noise_psd_w_hz,
+        allocated_bandwidth_hz=allocated_bandwidth_hz,
+    )
+
+    latency = compute_latency_components(
+        scenario=scenario,
+        access_rate_bps=link_state.rate_bps,
+        backhaul_rate_bps=backhaul_rate_bps,
+        input_payload_bits=input_payload_bits,
+        output_payload_bits=output_payload_bits,
+        workload_cycles=workload_cycles,
+        uav_capacity_cycles_s=uav_capacity_cycles_s,
+        sv_capacity_cycles_s=sv_capacity_cycles_s,
+        rcc_capacity_cycles_s=rcc_capacity_cycles_s,
+        number_of_uavs=number_of_uavs,
+        backhaul_fixed_delay_s=backhaul_fixed_delay_s,
+    )
+
+    result = UAVScenarioResult(
+        seed=seed,
+        scenario=latency.scenario,
+        execution_tier=latency.execution_tier,
+        uav_id=position.uav_id,
+        x_m=position.x_m,
+        y_m=position.y_m,
+        altitude_m=position.altitude_m,
+        distance_to_sv_m=position.distance_to_sv_m,
+        channel_gain_linear=link_state.channel_gain_linear,
+        snr_linear=link_state.snr_linear,
+        access_rate_bps=link_state.rate_bps,
+        backhaul_rate_bps=float(backhaul_rate_bps),
+        input_payload_bits=float(input_payload_bits),
+        output_payload_bits=float(output_payload_bits),
+        workload_cycles=float(workload_cycles),
+        access_payload_bits=latency.access_payload_bits,
+        backhaul_payload_bits=latency.backhaul_payload_bits,
+        effective_compute_capacity_cycles_s=(
+            latency.effective_compute_capacity_cycles_s
+        ),
+        access_time_s=latency.access_time_s,
+        compute_time_s=latency.compute_time_s,
+        backhaul_transmission_time_s=(
+            latency.backhaul_transmission_time_s
+        ),
+        backhaul_fixed_delay_s=latency.backhaul_fixed_delay_s,
+        end_to_end_latency_s=latency.end_to_end_latency_s,
+    )
+
+    expected_total = (
+        result.access_time_s
+        + result.compute_time_s
+        + result.backhaul_transmission_time_s
+        + result.backhaul_fixed_delay_s
+    )
+
+    if not math.isclose(
+        result.end_to_end_latency_s,
+        expected_total,
+        rel_tol=1.0e-12,
+        abs_tol=1.0e-12,
+    ):
+        raise ModelValidationError(
+            "Integrated UAV result contains an inconsistent latency."
+        )
+
+    return result
