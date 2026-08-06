@@ -339,6 +339,36 @@ def build_access_link_state(
         snr_linear=snr,
         rate_bps=rate,
     )
+
+@dataclass(frozen=True, slots=True)
+class ScenarioDefinition:
+    """Static definition of one homogeneous execution scenario."""
+
+    scenario: str
+    execution_tier: str
+    access_payload_kind: str
+    backhaul_payload_kind: str
+
+
+@dataclass(frozen=True, slots=True)
+class LatencyComponents:
+    """Resolved latency components for one UAV and one scenario."""
+
+    scenario: str
+    execution_tier: str
+
+    access_payload_bits: float
+    backhaul_payload_bits: float
+    effective_compute_capacity_cycles_s: float
+
+    access_time_s: float
+    compute_time_s: float
+    backhaul_transmission_time_s: float
+    backhaul_fixed_delay_s: float
+
+    end_to_end_latency_s: float
+
+
 def compute_bandwidth_per_uav(
     total_bandwidth_hz: float,
     number_of_uavs: int,
@@ -443,3 +473,202 @@ def compute_processing_time(
         )
 
     return processing_time
+
+_SCENARIO_DEFINITIONS: dict[str, ScenarioDefinition] = {
+    "S1": ScenarioDefinition(
+        scenario="S1",
+        execution_tier="UAV",
+        access_payload_kind="output",
+        backhaul_payload_kind="output",
+    ),
+    "S2": ScenarioDefinition(
+        scenario="S2",
+        execution_tier="SV",
+        access_payload_kind="input",
+        backhaul_payload_kind="output",
+    ),
+    "S3": ScenarioDefinition(
+        scenario="S3",
+        execution_tier="RCC",
+        access_payload_kind="input",
+        backhaul_payload_kind="input",
+    ),
+}
+
+
+def get_scenario_definition(
+    scenario: str,
+) -> ScenarioDefinition:
+    """Return the immutable definition of a supported scenario."""
+    if not isinstance(scenario, str):
+        raise ModelValidationError(
+            f"scenario must be a string. Received: {scenario!r}"
+        )
+
+    normalized = scenario.strip().upper()
+
+    try:
+        return _SCENARIO_DEFINITIONS[normalized]
+    except KeyError as exc:
+        raise ModelValidationError(
+            f"Unsupported scenario: {scenario!r}. "
+            "Expected one of: S1, S2, S3."
+        ) from exc
+
+def compute_latency_components(
+    scenario: str,
+    access_rate_bps: float,
+    backhaul_rate_bps: float,
+    input_payload_bits: float,
+    output_payload_bits: float,
+    workload_cycles: float,
+    uav_capacity_cycles_s: float,
+    sv_capacity_cycles_s: float,
+    rcc_capacity_cycles_s: float,
+    number_of_uavs: int,
+    backhaul_fixed_delay_s: float,
+) -> LatencyComponents:
+    """Compute all latency components for one UAV and one scenario."""
+    definition = get_scenario_definition(scenario)
+
+    access_rate = _require_positive_finite(
+        access_rate_bps,
+        "access_rate_bps",
+    )
+
+    backhaul_rate = _require_positive_finite(
+        backhaul_rate_bps,
+        "backhaul_rate_bps",
+    )
+
+    input_payload = _require_positive_finite(
+        input_payload_bits,
+        "input_payload_bits",
+    )
+
+    output_payload = _require_positive_finite(
+        output_payload_bits,
+        "output_payload_bits",
+    )
+
+    if output_payload > input_payload:
+        raise ModelValidationError(
+            "output_payload_bits cannot exceed input_payload_bits."
+        )
+
+    workload = _require_positive_finite(
+        workload_cycles,
+        "workload_cycles",
+    )
+
+    uav_capacity = _require_positive_finite(
+        uav_capacity_cycles_s,
+        "uav_capacity_cycles_s",
+    )
+
+    sv_capacity = _require_positive_finite(
+        sv_capacity_cycles_s,
+        "sv_capacity_cycles_s",
+    )
+
+    rcc_capacity = _require_positive_finite(
+        rcc_capacity_cycles_s,
+        "rcc_capacity_cycles_s",
+    )
+
+    uav_count = _require_positive_int(
+        number_of_uavs,
+        "number_of_uavs",
+    )
+
+    fixed_delay = _require_non_negative_finite(
+        backhaul_fixed_delay_s,
+        "backhaul_fixed_delay_s",
+    )
+
+    if definition.access_payload_kind == "output":
+        access_payload = output_payload
+    else:
+        access_payload = input_payload
+
+    if definition.backhaul_payload_kind == "output":
+        backhaul_payload = output_payload
+    else:
+        backhaul_payload = input_payload
+
+    if definition.scenario == "S1":
+        effective_compute_capacity = uav_capacity
+    elif definition.scenario == "S2":
+        effective_compute_capacity = compute_remote_capacity_per_job(
+            total_capacity_cycles_s=sv_capacity,
+            number_of_uavs=uav_count,
+        )
+    else:
+        effective_compute_capacity = compute_remote_capacity_per_job(
+            total_capacity_cycles_s=rcc_capacity,
+            number_of_uavs=uav_count,
+        )
+
+    access_time = compute_transmission_time(
+        payload_bits=access_payload,
+        rate_bps=access_rate,
+    )
+
+    compute_time = compute_processing_time(
+        workload_cycles=workload,
+        effective_capacity_cycles_s=effective_compute_capacity,
+    )
+
+    backhaul_transmission_time = compute_transmission_time(
+        payload_bits=backhaul_payload,
+        rate_bps=backhaul_rate,
+    )
+
+    end_to_end_latency = (
+        access_time
+        + compute_time
+        + backhaul_transmission_time
+        + fixed_delay
+    )
+
+    if (
+        not math.isfinite(end_to_end_latency)
+        or end_to_end_latency <= 0.0
+    ):
+        raise ModelValidationError(
+            "End-to-end latency calculation produced an invalid result."
+        )
+
+    component_sum = (
+        access_time
+        + compute_time
+        + backhaul_transmission_time
+        + fixed_delay
+    )
+
+    if not math.isclose(
+        end_to_end_latency,
+        component_sum,
+        rel_tol=1.0e-12,
+        abs_tol=1.0e-12,
+    ):
+        raise ModelValidationError(
+            "End-to-end latency is inconsistent with its components."
+        )
+
+    return LatencyComponents(
+        scenario=definition.scenario,
+        execution_tier=definition.execution_tier,
+        access_payload_bits=access_payload,
+        backhaul_payload_bits=backhaul_payload,
+        effective_compute_capacity_cycles_s=(
+            effective_compute_capacity
+        ),
+        access_time_s=access_time,
+        compute_time_s=compute_time,
+        backhaul_transmission_time_s=(
+            backhaul_transmission_time
+        ),
+        backhaul_fixed_delay_s=fixed_delay,
+        end_to_end_latency_s=end_to_end_latency,
+    )
