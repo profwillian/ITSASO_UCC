@@ -1,0 +1,3 @@
+Min: nan
+Max: nan
+Mean: nan

@@ -1,0 +1,16 @@
+Data da execução: Thu Aug  6 13:56:28 -03 2026
+
+Python:
+Python 3.10.20
+
+Docker:
+Docker version 29.6.2, build dfc4efb
+
+Docker Compose:
+Docker Compose version v5.3.1
+
+Git commit:
+3ad58a9c940e5dc5799e770c491d2ae3e8fef0fb
+
+Branch:
+main
