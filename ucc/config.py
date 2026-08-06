@@ -87,3 +87,42 @@ def dbm_per_hz_to_w_per_hz(value_dbm_hz: Real) -> float:
         )
 
     return converted
+def _as_positive_int(value: int, field_name: str) -> int:
+    """Validate and return a strictly positive integer."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigurationError(
+            f"{field_name} must be an integer. Received: {value!r}"
+        )
+
+    if value <= 0:
+        raise ConfigurationError(
+            f"{field_name} must be greater than zero. Received: {value}"
+        )
+
+    return value
+
+
+def resolve_factorized_grid(number_of_uavs: int) -> tuple[int, int]:
+    """
+    Resolve the most balanced integer grid whose product equals N.
+
+    Examples:
+        4  -> (2, 2)
+        8  -> (2, 4)
+        12 -> (3, 4)
+        16 -> (4, 4)
+    """
+    number_of_uavs = _as_positive_int(
+        number_of_uavs,
+        "number_of_uavs",
+    )
+
+    best_rows = 1
+    best_columns = number_of_uavs
+
+    for rows in range(1, math.isqrt(number_of_uavs) + 1):
+        if number_of_uavs % rows == 0:
+            best_rows = rows
+            best_columns = number_of_uavs // rows
+
+    return best_rows, best_columns
