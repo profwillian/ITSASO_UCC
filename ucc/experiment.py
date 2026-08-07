@@ -852,3 +852,114 @@ def evaluate_scalability_point(
         experiment_result=experiment_result,
     )
 
+@dataclass(frozen=True, slots=True)
+class ScalabilityExperimentResult:
+    """Complete result of the UAV scalability experiment."""
+
+    uav_counts: tuple[int, ...]
+    point_results: tuple[ScalabilityPointResult, ...]
+
+    total_spatial_realizations: int
+    total_per_uav_evaluations: int
+
+def evaluate_scalability_experiment(
+    config: ResolvedConfig,
+) -> ScalabilityExperimentResult:
+    """Evaluate all configured UAV-count scalability points."""
+    if not isinstance(config, ResolvedConfig):
+        raise ModelValidationError(
+            "config must be an instance of ResolvedConfig."
+        )
+
+    if config.experiment_type != "scalability":
+        raise ModelValidationError(
+            "evaluate_scalability_experiment requires "
+            "experiment.type='scalability'."
+        )
+
+    if not config.uav_counts:
+        raise ModelValidationError(
+            "The scalability experiment requires at least "
+            "one UAV count."
+        )
+
+    point_results = tuple(
+        evaluate_scalability_point(
+            config=config,
+            number_of_uavs=number_of_uavs,
+        )
+        for number_of_uavs in config.uav_counts
+    )
+
+    if len(point_results) != len(config.uav_counts):
+        raise ModelValidationError(
+            "Unexpected number of scalability-point results."
+        )
+
+    observed_uav_counts = tuple(
+        point.parameters.number_of_uavs
+        for point in point_results
+    )
+
+    if observed_uav_counts != config.uav_counts:
+        raise ModelValidationError(
+            "Scalability points do not match the configured "
+            "UAV-count order."
+        )
+
+    total_spatial_realizations = sum(
+        len(
+            point.experiment_result.seed_evaluations
+        )
+        for point in point_results
+    )
+
+    expected_spatial_realizations = (
+        len(config.uav_counts)
+        * len(config.seeds)
+    )
+
+    if (
+        total_spatial_realizations
+        != expected_spatial_realizations
+    ):
+        raise ModelValidationError(
+            "Unexpected number of spatial realizations "
+            "in scalability experiment."
+        )
+
+    total_per_uav_evaluations = sum(
+        len(scenario.results)
+        for point in point_results
+        for seed_evaluation
+        in point.experiment_result.seed_evaluations
+        for scenario
+        in seed_evaluation.scenario_evaluations
+    )
+
+    expected_per_uav_evaluations = sum(
+        number_of_uavs
+        * len(config.seeds)
+        * len(config.scenarios)
+        for number_of_uavs in config.uav_counts
+    )
+
+    if (
+        total_per_uav_evaluations
+        != expected_per_uav_evaluations
+    ):
+        raise ModelValidationError(
+            "Unexpected number of per-UAV evaluations "
+            "in scalability experiment."
+        )
+
+    return ScalabilityExperimentResult(
+        uav_counts=config.uav_counts,
+        point_results=point_results,
+        total_spatial_realizations=(
+            total_spatial_realizations
+        ),
+        total_per_uav_evaluations=(
+            total_per_uav_evaluations
+        ),
+    )
