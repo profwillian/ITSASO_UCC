@@ -1,48 +1,51 @@
 {
   "schema_version": "1.0",
-
   "experiment": {
-  "name": "ucc_scalability",
-  "description": "Scalability evaluation of homogeneous inference offloading",
-  "type": "scalability",
-  "scenarios": ["S1", "S2", "S3"],
-  "uav_counts": [4, 6, 8, 10, 12],
-  "number_of_repetitions": 50,
-  "seed_start": 1,
-  "paired_geometry": true,
-  "time_mode": "virtual",
-  "execution_backend": "equation_based"
- },
+    "name": "ucc_scalability",
+    "description": "Scalability evaluation of homogeneous inference offloading",
+    "type": "scalability",
+    "scenarios": [
+      "S1",
+      "S2",
+      "S3"
+    ],
+    "uav_counts": [
+      4,
+      6,
+      8,
+      10,
+      12
+    ],
+    "number_of_repetitions": 50,
+    "seed_start": 1,
+    "paired_geometry": true,
+    "time_mode": "virtual",
+    "execution_backend": "equation_based"
+  },
   "topology": {
-    "number_of_uavs": 8,
     "search_area_side_m": 1000.0,
     "uav_altitude_m": 500.0,
-
     "subregion_layout": {
       "strategy": "factorized_equal_area",
       "uav_assignment": "row_major",
       "position_distribution": "uniform"
     },
-
     "surface_vessel": {
       "position_mode": "center"
     }
   },
-
   "workload": {
     "chunks_per_job": 3,
     "chunk_size_mbit": 2.0,
-    "output_input_ratio": 0.10,
+    "output_input_ratio": 0.1,
     "compute_intensity_cycles_per_bit": 1000.0
   },
-
   "computation": {
     "uav_capacity_ghz": 0.2,
     "sv_capacity_ghz": 2.0,
     "rcc_capacity_ghz": 500.0,
     "remote_capacity_sharing": "static_equal"
   },
-
   "access_link": {
     "reference_distance_m": 1.0,
     "total_bandwidth_mhz": 10.0,
@@ -52,13 +55,11 @@
     "bandwidth_allocation": "static_equal",
     "channel_model": "free_space_path_loss"
   },
-
   "backhaul": {
     "aggregate_capacity_mbps": 5.0,
-    "fixed_delay_s": 0.10,
+    "fixed_delay_s": 0.1,
     "capacity_sharing": "static_equal"
   },
-
   "output": {
     "root_directory": "res_ucc",
     "save_resolved_config": true,

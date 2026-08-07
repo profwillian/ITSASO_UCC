@@ -349,26 +349,6 @@ def print_resolved_configuration(
         f"{config.decimal_places}"
     )
 
-    print_section(
-        "LEGACY REFERENCE TOPOLOGY "
-        "(NOT USED AS THE SCALABILITY SWEEP)"
-    )
-
-    print(
-        f"Reference number of UAVs:     "
-        f"{config.number_of_uavs}"
-    )
-    print(
-        f"Reference grid:               "
-        f"{config.grid_rows}x{config.grid_columns}"
-    )
-    print(
-        "Note:                         "
-        "the active scalability sweep is defined by "
-        "experiment.uav_counts."
-    )
-
-
 def print_point_result(
     point: ScalabilityPointResult,
 ) -> None:

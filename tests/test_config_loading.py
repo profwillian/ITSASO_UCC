@@ -41,27 +41,36 @@ def write_config(
 
 
 def test_load_scalability_configuration() -> None:
+    """Load and validate the complete scalability configuration."""
     config = load_and_resolve_config(
         BASELINE_CONFIG
     )
 
     assert config.schema_version == "1.0"
+
     assert config.experiment_name == "ucc_scalability"
     assert config.experiment_type == "scalability"
-    assert config.scenarios == ("S1", "S2", "S3")
+
+    assert config.scenarios == (
+        "S1",
+        "S2",
+        "S3",
+    )
 
     assert config.uav_counts == (
-	    4,
-	    6,
-	    8,
-	    10,
-	    12,
-   )
+        4,
+        6,
+        8,
+        10,
+        12,
+    )
 
-    assert config.seeds == tuple(range(1, 51))
-    assert config.number_of_uavs == 8
-    assert config.grid_rows == 2
-    assert config.grid_columns == 4
+    assert config.seeds == tuple(
+        range(1, 51)
+    )
+
+    assert config.search_area_side_m == 1000.0
+    assert config.uav_altitude_m == 500.0
 
     assert config.sv_x_m == 500.0
     assert config.sv_y_m == 500.0
@@ -71,23 +80,33 @@ def test_load_scalability_configuration() -> None:
     assert config.output_payload_bits == 600_000.0
     assert config.workload_cycles == 6_000_000_000.0
 
-    assert config.uav_capacity_cycles_s == 200_000_000.0
-    assert config.sv_capacity_cycles_s == 2_000_000_000.0
-    assert config.rcc_capacity_cycles_s == 500_000_000_000.0
-
-    assert config.sv_capacity_per_job_cycles_s == 250_000_000.0
     assert (
-        config.rcc_capacity_per_job_cycles_s
-        == 62_500_000_000.0
+        config.uav_capacity_cycles_s
+        == 200_000_000.0
     )
 
-    assert config.total_bandwidth_hz == 10_000_000.0
-    assert config.bandwidth_per_uav_hz == 1_250_000.0
+    assert (
+        config.sv_capacity_cycles_s
+        == 2_000_000_000.0
+    )
 
-    assert config.backhaul_capacity_bps == 5_000_000.0
-    assert config.backhaul_rate_per_flow_bps == 625_000.0
+    assert (
+        config.rcc_capacity_cycles_s
+        == 500_000_000_000.0
+    )
+
+    assert (
+        config.total_bandwidth_hz
+        == 10_000_000.0
+    )
+
+    assert (
+        config.backhaul_capacity_bps
+        == 5_000_000.0
+    )
 
     assert config.backhaul_fixed_delay_s == 0.10
+
 
 
 def test_unknown_root_field_is_rejected(
@@ -134,21 +153,23 @@ def test_missing_field_is_rejected(
     ):
         load_and_resolve_config(path)
 
-
-@pytest.mark.parametrize(
-    "number_of_uavs",
-    [0, 6, 10, 20],
-)
-def test_unsupported_uav_count_is_rejected(
+def test_legacy_topology_uav_count_is_rejected(
     tmp_path: Path,
-    number_of_uavs: int,
 ) -> None:
+    """Reject the obsolete fixed UAV-count topology field."""
     raw = read_baseline_raw()
-    raw["topology"]["number_of_uavs"] = number_of_uavs
 
-    path = write_config(tmp_path, raw)
+    raw["topology"]["number_of_uavs"] = 8
 
-    with pytest.raises(ConfigurationError):
+    path = write_config(
+        tmp_path,
+        raw,
+    )
+
+    with pytest.raises(
+        ConfigurationError,
+        match="unknown fields",
+    ):
         load_and_resolve_config(path)
 
 

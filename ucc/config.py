@@ -153,11 +153,8 @@ class ResolvedConfig:
     time_mode: str
     execution_backend: str
 
-    number_of_uavs: int
     search_area_side_m: float
     uav_altitude_m: float
-    grid_rows: int
-    grid_columns: int
     sv_x_m: float
     sv_y_m: float
 
@@ -172,19 +169,15 @@ class ResolvedConfig:
     uav_capacity_cycles_s: float
     sv_capacity_cycles_s: float
     rcc_capacity_cycles_s: float
-    sv_capacity_per_job_cycles_s: float
-    rcc_capacity_per_job_cycles_s: float
 
     reference_distance_m: float
     total_bandwidth_hz: float
-    bandwidth_per_uav_hz: float
     uav_transmit_power_w: float
     reference_channel_gain_linear: float
     noise_psd_w_hz: float
 
     backhaul_capacity_bps: float
-    backhaul_rate_per_flow_bps: float
-    backhaul_fixed_delay_s: float
+    backhaul_fixed_delay_s: float    
 
     output_root_directory: str
     save_resolved_config: bool
@@ -315,8 +308,6 @@ def _require_supported_uav_count(value: object) -> int:
             "topology.number_of_uavs must be one of "
             f"{sorted(supported)}. Received: {number_of_uavs}"
         )
-
-    return number_of_uavs
 
 
 def read_json(path: str | Path) -> dict[str, Any]:
@@ -556,7 +547,6 @@ def load_and_resolve_config(
     _require_exact_keys(
         topology,
         {
-            "number_of_uavs",
             "search_area_side_m",
             "uav_altitude_m",
             "subregion_layout",
@@ -720,10 +710,6 @@ def load_and_resolve_config(
         "experiment.execution_backend",
     )
 
-    number_of_uavs = _require_supported_uav_count(
-        topology["number_of_uavs"]
-    )
-
     search_area_side_m = _as_positive_float(
         topology["search_area_side_m"],
         "topology.search_area_side_m",
@@ -758,9 +744,6 @@ def load_and_resolve_config(
         "topology.surface_vessel.position_mode",
     )
 
-    grid_rows, grid_columns = resolve_factorized_grid(
-        number_of_uavs
-    )
 
     sv_x_m = search_area_side_m / 2.0
     sv_y_m = search_area_side_m / 2.0
@@ -834,14 +817,6 @@ def load_and_resolve_config(
         "computation.remote_capacity_sharing",
     )
 
-    sv_capacity_per_job_cycles_s = (
-        sv_capacity_cycles_s / number_of_uavs
-    )
-
-    rcc_capacity_per_job_cycles_s = (
-        rcc_capacity_cycles_s / number_of_uavs
-    )
-
     reference_distance_m = _as_positive_float(
         access_link["reference_distance_m"],
         "access_link.reference_distance_m",
@@ -852,10 +827,6 @@ def load_and_resolve_config(
             access_link["total_bandwidth_mhz"],
             "access_link.total_bandwidth_mhz",
         )
-    )
-
-    bandwidth_per_uav_hz = (
-        total_bandwidth_hz / number_of_uavs
     )
 
     uav_transmit_power_w = _as_positive_float(
@@ -888,10 +859,6 @@ def load_and_resolve_config(
             backhaul["aggregate_capacity_mbps"],
             "backhaul.aggregate_capacity_mbps",
         )
-    )
-
-    backhaul_rate_per_flow_bps = (
-        backhaul_capacity_bps / number_of_uavs
     )
 
     backhaul_fixed_delay_s = _as_non_negative_float(
@@ -954,10 +921,6 @@ def load_and_resolve_config(
         input_payload_bits,
         output_payload_bits,
         workload_cycles,
-        sv_capacity_per_job_cycles_s,
-        rcc_capacity_per_job_cycles_s,
-        bandwidth_per_uav_hz,
-        backhaul_rate_per_flow_bps,
     )
 
     if not all(
@@ -979,11 +942,8 @@ def load_and_resolve_config(
         paired_geometry=paired_geometry,
         time_mode=time_mode,
         execution_backend=execution_backend,
-        number_of_uavs=number_of_uavs,
         search_area_side_m=search_area_side_m,
         uav_altitude_m=uav_altitude_m,
-        grid_rows=grid_rows,
-        grid_columns=grid_columns,
         sv_x_m=sv_x_m,
         sv_y_m=sv_y_m,
         chunks_per_job=chunks_per_job,
@@ -996,24 +956,14 @@ def load_and_resolve_config(
         uav_capacity_cycles_s=uav_capacity_cycles_s,
         sv_capacity_cycles_s=sv_capacity_cycles_s,
         rcc_capacity_cycles_s=rcc_capacity_cycles_s,
-        sv_capacity_per_job_cycles_s=(
-            sv_capacity_per_job_cycles_s
-        ),
-        rcc_capacity_per_job_cycles_s=(
-            rcc_capacity_per_job_cycles_s
-        ),
         reference_distance_m=reference_distance_m,
         total_bandwidth_hz=total_bandwidth_hz,
-        bandwidth_per_uav_hz=bandwidth_per_uav_hz,
         uav_transmit_power_w=uav_transmit_power_w,
         reference_channel_gain_linear=(
             reference_channel_gain_linear
         ),
         noise_psd_w_hz=noise_psd_w_hz,
         backhaul_capacity_bps=backhaul_capacity_bps,
-        backhaul_rate_per_flow_bps=(
-            backhaul_rate_per_flow_bps
-        ),
         backhaul_fixed_delay_s=backhaul_fixed_delay_s,
         output_root_directory=output_root_directory,
         save_resolved_config=save_resolved_config,
