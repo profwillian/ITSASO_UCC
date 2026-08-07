@@ -19,6 +19,10 @@ from ucc.experiment import (
     evaluate_scalability_experiment,
 )
 from ucc.model import ModelValidationError
+from ucc.results import (
+    RunArtifacts,
+    write_run_artifacts,
+)
 
 
 SCENARIO_LABELS = {
@@ -59,7 +63,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 
 def scenario_label(scenario: str) -> str:
-    """Return the human-readable scenario name."""
+    """Return the human-readable scenario label."""
     return SCENARIO_LABELS.get(
         scenario,
         scenario,
@@ -103,7 +107,7 @@ def print_section(title: str) -> None:
 def print_resolved_configuration(
     config: ResolvedConfig,
 ) -> None:
-    """Print all relevant resolved experimental parameters."""
+    """Print all resolved experimental parameters."""
     print("=" * SEPARATOR_WIDTH)
     print("UCC MARITIME SCALABILITY EXPERIMENT")
     print("=" * SEPARATOR_WIDTH)
@@ -349,6 +353,7 @@ def print_resolved_configuration(
         f"{config.decimal_places}"
     )
 
+
 def print_point_result(
     point: ScalabilityPointResult,
 ) -> None:
@@ -360,9 +365,7 @@ def print_point_result(
 
     print()
     print("=" * SEPARATOR_WIDTH)
-    print(
-        f"N = {number_of_uavs} UAVs"
-    )
+    print(f"N = {number_of_uavs} UAVs")
     print("=" * SEPARATOR_WIDTH)
 
     print(
@@ -536,7 +539,9 @@ def print_consolidated_results(
             in point.experiment_result.scenario_summaries
         }
 
-        number_of_uavs = point.parameters.number_of_uavs
+        number_of_uavs = (
+            point.parameters.number_of_uavs
+        )
 
         s1_ms = latency_ms(
             summaries["S1"].mean_of_max_latency_s
@@ -570,7 +575,7 @@ def print_consolidated_results(
 def print_experiment_result(
     result: ScalabilityExperimentResult,
 ) -> None:
-    """Print all detailed and consolidated scalability results."""
+    """Print detailed and consolidated scalability results."""
     print()
     print("=" * SEPARATOR_WIDTH)
     print("SIMULATION COMPLETED")
@@ -595,13 +600,36 @@ def print_experiment_result(
     print_consolidated_results(result)
 
 
+def print_run_artifacts(
+    artifacts: RunArtifacts,
+) -> None:
+    """Print the paths generated for the completed run."""
+    print()
+    print("=" * SEPARATOR_WIDTH)
+    print("EXPERIMENT ARTIFACTS")
+    print("=" * SEPARATOR_WIDTH)
+
+    print(
+        f"Run directory:                "
+        f"{artifacts.run_directory}"
+    )
+    print(
+        f"Experiment parameters:        "
+        f"{artifacts.parameters_path}"
+    )
+    print(
+        f"Scalability summary:          "
+        f"{artifacts.summary_path}"
+    )
+
+
 def validate_scalability_configuration(
     config: ResolvedConfig,
 ) -> None:
-    """Ensure the runner received a scalability experiment."""
+    """Ensure the runner received the expected scalability protocol."""
     if config.experiment_type != "scalability":
         raise ModelValidationError(
-            "simulate_ucc.py currently requires "
+            "simulate_ucc.py requires "
             "experiment.type='scalability'."
         )
 
@@ -628,9 +656,13 @@ def main() -> int:
             arguments.config
         )
 
-        validate_scalability_configuration(config)
+        validate_scalability_configuration(
+            config
+        )
 
-        print_resolved_configuration(config)
+        print_resolved_configuration(
+            config
+        )
 
         if arguments.validate_only:
             print()
@@ -643,7 +675,18 @@ def main() -> int:
             config
         )
 
-        print_experiment_result(result)
+        print_experiment_result(
+            result
+        )
+
+        artifacts = write_run_artifacts(
+            config=config,
+            result=result,
+        )
+
+        print_run_artifacts(
+            artifacts
+        )
 
         return 0
 
