@@ -19,6 +19,7 @@ from ucc.experiment import (
     evaluate_scalability_experiment,
 )
 from ucc.model import ModelValidationError
+from ucc.plots import generate_scalability_latency_plot
 from ucc.results import (
     RunArtifacts,
     write_run_artifacts,
@@ -687,6 +688,23 @@ def main() -> int:
         print_run_artifacts(
             artifacts
         )
+
+        if config.generate_plots:
+            pdf_path, png_path = (
+                generate_scalability_latency_plot(
+                    csv_path=artifacts.summary_path,
+                    output_directory=artifacts.run_directory,
+                )
+            )
+
+            print(
+                f"Scalability plot PDF:         "
+                f"{pdf_path}"
+            )
+            print(
+                f"Scalability plot PNG:         "
+                f"{png_path}"
+            )
 
         return 0
 
