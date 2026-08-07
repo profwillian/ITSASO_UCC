@@ -6,10 +6,16 @@ import math
 import statistics
 from dataclasses import dataclass
 
+from ucc.config import (
+    ResolvedConfig,
+    resolve_factorized_grid,
+)
+
 from ucc.geometry import (
     SpatialRealization,
     generate_spatial_realization,
 )
+
 from ucc.model import (
     ModelValidationError,
     UAVScenarioResult,
@@ -665,3 +671,184 @@ def evaluate_experiment(
         paired_comparisons=paired_comparisons,
         scenario_summaries=scenario_summaries,
     )
+@dataclass(frozen=True, slots=True)
+class ScalabilityPointParameters:
+    """Resolved parameters for one UAV-count scalability point."""
+
+    number_of_uavs: int
+
+    grid_rows: int
+    grid_columns: int
+
+    bandwidth_per_uav_hz: float
+    backhaul_rate_per_flow_bps: float
+
+    sv_capacity_per_job_cycles_s: float
+    rcc_capacity_per_job_cycles_s: float
+
+    experiment_parameters: ExperimentParameters
+
+
+@dataclass(frozen=True, slots=True)
+class ScalabilityPointResult:
+    """Complete result for one UAV-count scalability point."""
+
+    parameters: ScalabilityPointParameters
+    experiment_result: ExperimentResult
+def build_scalability_point_parameters(
+    config: ResolvedConfig,
+    number_of_uavs: int,
+) -> ScalabilityPointParameters:
+    """Resolve all N-dependent parameters for one scalability point."""
+    if not isinstance(config, ResolvedConfig):
+        raise ModelValidationError(
+            "config must be an instance of ResolvedConfig."
+        )
+
+    if (
+        isinstance(number_of_uavs, bool)
+        or not isinstance(number_of_uavs, int)
+    ):
+        raise ModelValidationError(
+            "number_of_uavs must be an integer."
+        )
+
+    if number_of_uavs not in config.uav_counts:
+        raise ModelValidationError(
+            f"number_of_uavs={number_of_uavs} is not part of "
+            f"the configured scalability set {config.uav_counts}."
+        )
+
+    grid_rows, grid_columns = resolve_factorized_grid(
+        number_of_uavs
+    )
+
+    bandwidth_per_uav_hz = (
+        config.total_bandwidth_hz / number_of_uavs
+    )
+
+    backhaul_rate_per_flow_bps = (
+        config.backhaul_capacity_bps / number_of_uavs
+    )
+
+    sv_capacity_per_job_cycles_s = (
+        config.sv_capacity_cycles_s / number_of_uavs
+    )
+
+    rcc_capacity_per_job_cycles_s = (
+        config.rcc_capacity_cycles_s / number_of_uavs
+    )
+
+    derived_values = (
+        bandwidth_per_uav_hz,
+        backhaul_rate_per_flow_bps,
+        sv_capacity_per_job_cycles_s,
+        rcc_capacity_per_job_cycles_s,
+    )
+
+    if not all(
+        math.isfinite(value) and value > 0.0
+        for value in derived_values
+    ):
+        raise ModelValidationError(
+            "Scalability-point derivation produced an invalid value."
+        )
+
+    experiment_parameters = ExperimentParameters(
+        number_of_uavs=number_of_uavs,
+        area_side_m=config.search_area_side_m,
+        altitude_m=config.uav_altitude_m,
+        sv_x_m=config.sv_x_m,
+        sv_y_m=config.sv_y_m,
+        reference_distance_m=config.reference_distance_m,
+        reference_gain_linear=(
+            config.reference_channel_gain_linear
+        ),
+        transmit_power_w=config.uav_transmit_power_w,
+        noise_psd_w_hz=config.noise_psd_w_hz,
+        total_bandwidth_hz=config.total_bandwidth_hz,
+        aggregate_backhaul_capacity_bps=(
+            config.backhaul_capacity_bps
+        ),
+        backhaul_fixed_delay_s=(
+            config.backhaul_fixed_delay_s
+        ),
+        input_payload_bits=config.input_payload_bits,
+        output_payload_bits=config.output_payload_bits,
+        workload_cycles=config.workload_cycles,
+        uav_capacity_cycles_s=(
+            config.uav_capacity_cycles_s
+        ),
+        sv_capacity_cycles_s=(
+            config.sv_capacity_cycles_s
+        ),
+        rcc_capacity_cycles_s=(
+            config.rcc_capacity_cycles_s
+        ),
+        scenarios=config.scenarios,
+    )
+
+    return ScalabilityPointParameters(
+        number_of_uavs=number_of_uavs,
+        grid_rows=grid_rows,
+        grid_columns=grid_columns,
+        bandwidth_per_uav_hz=bandwidth_per_uav_hz,
+        backhaul_rate_per_flow_bps=(
+            backhaul_rate_per_flow_bps
+        ),
+        sv_capacity_per_job_cycles_s=(
+            sv_capacity_per_job_cycles_s
+        ),
+        rcc_capacity_per_job_cycles_s=(
+            rcc_capacity_per_job_cycles_s
+        ),
+        experiment_parameters=experiment_parameters,
+    )
+def evaluate_scalability_point(
+    config: ResolvedConfig,
+    number_of_uavs: int,
+) -> ScalabilityPointResult:
+    """Evaluate all seeds and scenarios for one UAV count."""
+    point_parameters = build_scalability_point_parameters(
+        config=config,
+        number_of_uavs=number_of_uavs,
+    )
+
+    experiment_result = evaluate_experiment(
+        seeds=config.seeds,
+        parameters=point_parameters.experiment_parameters,
+    )
+
+    if len(experiment_result.seed_evaluations) != len(
+        config.seeds
+    ):
+        raise ModelValidationError(
+            "Scalability point produced an unexpected "
+            "number of spatial realizations."
+        )
+
+    expected_evaluations = (
+        number_of_uavs
+        * len(config.seeds)
+        * len(config.scenarios)
+    )
+
+    observed_evaluations = sum(
+        len(scenario.results)
+        for seed_evaluation
+        in experiment_result.seed_evaluations
+        for scenario
+        in seed_evaluation.scenario_evaluations
+    )
+
+    if observed_evaluations != expected_evaluations:
+        raise ModelValidationError(
+            "Scalability point produced an unexpected "
+            "number of per-UAV evaluations."
+        )
+
+    return ScalabilityPointResult(
+        parameters=point_parameters,
+        experiment_result=experiment_result,
+    )
+
