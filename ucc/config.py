@@ -143,6 +143,7 @@ class ResolvedConfig:
     experiment_description: str
     experiment_type: str
     scenarios: tuple[str, ...]
+    uav_counts: tuple[int, ...]
     seeds: tuple[int, ...]
     paired_geometry: bool
     time_mode: str
@@ -412,6 +413,62 @@ def _resolve_scenarios(
     return resolved
 
 
+def _resolve_uav_counts(
+    value: object,
+) -> tuple[int, ...]:
+    """Validate the ordered UAV counts used in scalability evaluation."""
+    if not isinstance(value, list):
+        raise ConfigurationError(
+            "experiment.uav_counts must be a JSON array."
+        )
+
+    if not value:
+        raise ConfigurationError(
+            "experiment.uav_counts must not be empty."
+        )
+
+    resolved: list[int] = []
+
+    for index, number_of_uavs in enumerate(value):
+        if (
+            isinstance(number_of_uavs, bool)
+            or not isinstance(number_of_uavs, int)
+        ):
+            raise ConfigurationError(
+                f"experiment.uav_counts[{index}] "
+                "must be an integer."
+            )
+
+        if number_of_uavs <= 0:
+            raise ConfigurationError(
+                f"experiment.uav_counts[{index}] "
+                "must be greater than zero."
+            )
+
+        resolved.append(number_of_uavs)
+
+    if len(set(resolved)) != len(resolved):
+        raise ConfigurationError(
+            "experiment.uav_counts must not contain duplicates."
+        )
+
+    if resolved != sorted(resolved):
+        raise ConfigurationError(
+            "experiment.uav_counts must be in ascending order."
+        )
+
+    expected = (4, 6, 8, 10, 12)
+
+    result = tuple(resolved)
+
+    if result != expected:
+        raise ConfigurationError(
+            "experiment.uav_counts must be exactly "
+            "[4, 6, 8, 10, 12]."
+        )
+
+    return result
+
 
 def load_and_resolve_config(
     path: str | Path,
@@ -476,19 +533,20 @@ def load_and_resolve_config(
     )
 
     _require_exact_keys(
-        experiment,
-        {
-            "name",
-            "description",
-            "type",
-            "scenarios",
-            "number_of_repetitions",
-            "seed_start",
-            "paired_geometry",
-            "time_mode",
-            "execution_backend",
-        },
-        "experiment",
+    experiment,
+    {
+        "name",
+        "description",
+        "type",
+        "scenarios",
+        "uav_counts",
+        "number_of_repetitions",
+        "seed_start",
+        "paired_geometry",
+        "time_mode",
+        "execution_backend",
+    },
+    "experiment",
     )
 
     _require_exact_keys(
@@ -611,13 +669,17 @@ def load_and_resolve_config(
     )
 
     experiment_type = _require_choice(
-        experiment["type"],
-        {"baseline"},
-        "experiment.type",
+    experiment["type"],
+    {"baseline", "scalability"},
+    "experiment.type",
     )
 
     scenarios = _resolve_scenarios(
         experiment["scenarios"]
+    )
+
+    uav_counts = _resolve_uav_counts(
+    experiment["uav_counts"]
     )
 
     number_of_repetitions = _as_positive_int(
@@ -903,12 +965,13 @@ def load_and_resolve_config(
         )
 
     return ResolvedConfig(
-        schema_version=schema_version,
-        experiment_name=experiment_name,
-        experiment_description=experiment_description,
-        experiment_type=experiment_type,
-        scenarios=scenarios,
-        seeds=seeds,
+	schema_version=schema_version,
+	experiment_name=experiment_name,
+	experiment_description=experiment_description,
+	experiment_type=experiment_type,
+	scenarios=scenarios,
+    	uav_counts=uav_counts,
+    	seeds=seeds,
         paired_geometry=paired_geometry,
         time_mode=time_mode,
         execution_backend=execution_backend,

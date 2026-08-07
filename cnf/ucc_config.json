@@ -2,17 +2,17 @@
   "schema_version": "1.0",
 
   "experiment": {
-    "name": "ucc_baseline",
-    "description": "Baseline evaluation of homogeneous inference offloading",
-    "type": "baseline",
-    "scenarios": ["S1", "S2", "S3"],
-    "number_of_repetitions": 50,
-    "seed_start": 1,
-    "paired_geometry": true,
-    "time_mode": "virtual",
-    "execution_backend": "equation_based"
-  },
-
+  "name": "ucc_scalability",
+  "description": "Scalability evaluation of homogeneous inference offloading",
+  "type": "scalability",
+  "scenarios": ["S1", "S2", "S3"],
+  "uav_counts": [4, 6, 8, 10, 12],
+  "number_of_repetitions": 50,
+  "seed_start": 1,
+  "paired_geometry": true,
+  "time_mode": "virtual",
+  "execution_backend": "equation_based"
+ },
   "topology": {
     "number_of_uavs": 8,
     "search_area_side_m": 1000.0,

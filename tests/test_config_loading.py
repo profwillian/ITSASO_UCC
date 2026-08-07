@@ -40,16 +40,25 @@ def write_config(
     return path
 
 
-def test_load_baseline_configuration() -> None:
+def test_load_scalability_configuration() -> None:
     config = load_and_resolve_config(
         BASELINE_CONFIG
     )
 
     assert config.schema_version == "1.0"
-    assert config.experiment_name == "ucc_baseline"
+    assert config.experiment_name == "ucc_scalability"
+    assert config.experiment_type == "scalability"
     assert config.scenarios == ("S1", "S2", "S3")
-    assert config.seeds == tuple(range(1, 51))
 
+    assert config.uav_counts == (
+	    4,
+	    6,
+	    8,
+	    10,
+	    12,
+   )
+
+    assert config.seeds == tuple(range(1, 51))
     assert config.number_of_uavs == 8
     assert config.grid_rows == 2
     assert config.grid_columns == 4
@@ -229,4 +238,36 @@ def test_nonexistent_file_is_rejected(
         ConfigurationError,
         match="does not exist",
     ):
+        load_and_resolve_config(path)
+
+@pytest.mark.parametrize(
+    "uav_counts",
+    [
+        [4, 6, 8, 12],
+        [4, 6, 8, 10, 12, 14],
+        [4, 8, 6, 10, 12],
+        [4, 6, 8, 10, 10],
+        [],
+    ],
+)
+def test_invalid_scalability_uav_counts_are_rejected(
+    tmp_path: Path,
+    uav_counts: list[int],
+) -> None:
+    raw = read_baseline_raw()
+    raw["experiment"]["uav_counts"] = uav_counts
+
+    path = write_config(tmp_path, raw)
+
+    with pytest.raises(ConfigurationError):
+        load_and_resolve_config(path)
+def test_uav_counts_must_be_an_array(
+    tmp_path: Path,
+) -> None:
+    raw = read_baseline_raw()
+    raw["experiment"]["uav_counts"] = 8
+
+    path = write_config(tmp_path, raw)
+
+    with pytest.raises(ConfigurationError):
         load_and_resolve_config(path)
