@@ -108,30 +108,34 @@ def _as_positive_int(value: int, field_name: str) -> int:
     return value
 
 
-def resolve_factorized_grid(number_of_uavs: int) -> tuple[int, int]:
-    """
-    Resolve the most balanced integer grid whose product equals N.
+def resolve_factorized_grid(
+    number_of_uavs: int,
+) -> tuple[int, int]:
+    """Return the most balanced integer grid for N UAVs."""
+    if (
+        isinstance(number_of_uavs, bool)
+        or not isinstance(number_of_uavs, int)
+    ):
+        raise ConfigurationError(
+            "number_of_uavs must be an integer."
+        )
 
-    Examples:
-        4  -> (2, 2)
-        8  -> (2, 4)
-        12 -> (3, 4)
-        16 -> (4, 4)
-    """
-    number_of_uavs = _as_positive_int(
-        number_of_uavs,
-        "number_of_uavs",
+    if number_of_uavs <= 0:
+        raise ConfigurationError(
+            "number_of_uavs must be greater than zero."
+        )
+
+    root = math.isqrt(number_of_uavs)
+
+    for rows in range(root, 0, -1):
+        if number_of_uavs % rows == 0:
+            columns = number_of_uavs // rows
+            return rows, columns
+
+    raise ConfigurationError(
+        f"Unable to factorize grid for N={number_of_uavs}."
     )
 
-    best_rows = 1
-    best_columns = number_of_uavs
-
-    for rows in range(1, math.isqrt(number_of_uavs) + 1):
-        if number_of_uavs % rows == 0:
-            best_rows = rows
-            best_columns = number_of_uavs // rows
-
-    return best_rows, best_columns
 
 @dataclass(frozen=True, slots=True)
 class ResolvedConfig:
