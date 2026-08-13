@@ -6,7 +6,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
-from ucc_protocol import mbit_to_bytes, read_frame
+from ucc_protocol import (
+    mbit_to_bytes,
+    read_frame,
+)
 
 
 def timestamp():
@@ -67,6 +70,8 @@ def save_results(config, scenario, workloads):
                 "t_emulated_s": t_emulated_s,
                 "error_s": error_s,
                 "error_pct": error_pct,
+                "backhaul_tcp_source_port":
+                    message["backhaul_tcp_source_port"],
             }
         )
 
@@ -123,6 +128,53 @@ def save_results(config, scenario, workloads):
         json.dump(summary, jsonfile, indent=2)
 
     return rows, summary
+
+
+def receive_backhaul(connection):
+    conn = connection["socket"]
+    addr = connection["addr"]
+
+    with conn.makefile("rb") as stream:
+        message, payload = read_frame(stream)
+
+    conn.close()
+
+    if message is None:
+        raise RuntimeError(
+            "[RCC] Backhaul connection closed "
+            "before workload was received."
+        )
+
+    if message.get("type") != "WORKLOAD":
+        raise RuntimeError(
+            "[RCC] Expected WORKLOAD on backhaul flow."
+        )
+
+    if message["scenario"] != scenario:
+        raise RuntimeError(
+            f"[RCC] Scenario mismatch: "
+            f"container={scenario}, "
+            f"message={message['scenario']}."
+        )
+
+    expected_payload_bytes = mbit_to_bytes(
+        message["current_payload_mbit"]
+    )
+
+    if len(payload) != expected_payload_bytes:
+        raise RuntimeError(
+            f"[RCC] Payload mismatch for UAV "
+            f"{message['uav_id']}: "
+            f"expected={expected_payload_bytes}, "
+            f"received={len(payload)}."
+        )
+
+    message["backhaul_payload_bytes_received"] = len(payload)
+    message["rcc_observed_tcp_source_port"] = addr[1]
+    message["rcc_received_at"] = timestamp()
+    message["rcc_received_epoch_s"] = time.time()
+
+    return message
 
 
 config_path = os.environ.get(
@@ -192,11 +244,7 @@ def process_at_rcc(message):
         expected_compute_time_s
     )
     message["compute_measured_s"] = measured
-
-    message["current_payload_mbit"] = (
-        output_size_mbit
-    )
-
+    message["current_payload_mbit"] = output_size_mbit
     message["inference_finished_at"] = timestamp()
     message["completion_epoch_s"] = time.time()
 
@@ -205,17 +253,7 @@ def process_at_rcc(message):
 
 print(
     f"[RCC] Starting RCC node on port {port}. "
-    f"Scenario={scenario}. Waiting for SV connection.",
-    flush=True,
-)
-
-print(
-    f"[RCC] Computation configuration: "
-    f"W={workload_cycles:.0f} cycles, "
-    f"capacity={rcc_capacity_gcycles_s:.3f} Gcycles/s, "
-    f"N={num_uavs}, "
-    f"expected_per_workload="
-    f"{expected_compute_time_s:.6f} s.",
+    f"Scenario={scenario}.",
     flush=True,
 )
 
@@ -231,80 +269,65 @@ server.setsockopt(
 )
 
 server.bind((host, port))
-server.listen(1)
-
-conn, addr = server.accept()
+server.listen(num_uavs)
 
 print(
-    f"[RCC] SV connected from "
-    f"{addr[0]}:{addr[1]}",
+    f"[RCC] Waiting for {num_uavs} independent "
+    f"backhaul TCP flows.",
     flush=True,
 )
 
-workloads = []
+connections = []
 
-with conn.makefile("rb") as stream:
-    while True:
-        message, payload = read_frame(stream)
+while len(connections) < num_uavs:
+    conn, addr = server.accept()
 
-        if message is None:
-            break
+    connections.append(
+        {
+            "socket": conn,
+            "addr": addr,
+        }
+    )
 
-        if message.get("type") == "END":
-            print(
-                "[RCC] End-of-experiment signal received.",
-                flush=True,
-            )
-            break
+    print(
+        f"[RCC] Accepted backhaul TCP flow "
+        f"{len(connections)}/{num_uavs} "
+        f"from {addr[0]}:{addr[1]}.",
+        flush=True,
+    )
 
-        if message["scenario"] != scenario:
-            raise RuntimeError(
-                f"[RCC] Scenario mismatch: "
-                f"container={scenario}, "
-                f"message={message['scenario']}."
-            )
-
-        message["rcc_received_at"] = timestamp()
-        message["rcc_received_epoch_s"] = time.time()
-
-        if scenario == "S1":
-            if message["execution_tier"] != "SV":
-                raise RuntimeError(
-                    f"[RCC] S1 workload from UAV "
-                    f"{message['uav_id']} "
-                    f"was not processed at SV."
-                )
-
-            message["completion_epoch_s"] = (
-                message["rcc_received_epoch_s"]
-            )
-
-        expected_payload_bytes = mbit_to_bytes(
-            message["current_payload_mbit"]
+with ThreadPoolExecutor(max_workers=num_uavs) as executor:
+    workloads = list(
+        executor.map(
+            receive_backhaul,
+            connections,
         )
+    )
 
-        if len(payload) != expected_payload_bytes:
-            raise RuntimeError(
-                f"[RCC] Payload mismatch for UAV "
-                f"{message['uav_id']}: "
-                f"expected={expected_payload_bytes}, "
-                f"received={len(payload)}."
-            )
-
-        message["backhaul_payload_bytes_received"] = len(payload)
-
-        workloads.append(message)
-
-        print(
-            f"[RCC] Received {message['workload_id']} "
-            f"with {len(payload)} bytes "
-            f"({message['current_payload_mbit']:.3f} Mbit). "
-            f"Batch={len(workloads)}/{num_uavs}.",
-            flush=True,
-        )
-
-conn.close()
 server.close()
+
+workloads.sort(
+    key=lambda message: message["uav_id"]
+)
+
+for message in workloads:
+    print(
+        f"[RCC] Received UAV {message['uav_id']} "
+        f"via TCP source_port="
+        f"{message['rcc_observed_tcp_source_port']}, "
+        f"bytes="
+        f"{message['backhaul_payload_bytes_received']}.",
+        flush=True,
+    )
+
+    if (
+        message["rcc_observed_tcp_source_port"]
+        != message["backhaul_tcp_source_port"]
+    ):
+        raise RuntimeError(
+            f"[RCC] TCP source-port mismatch for "
+            f"UAV {message['uav_id']}."
+        )
 
 total_backhaul_bytes_received = sum(
     message["backhaul_payload_bytes_received"]
@@ -323,7 +346,20 @@ if len(workloads) != num_uavs:
         f"but received {len(workloads)}."
     )
 
-if scenario == "S2":
+if scenario == "S1":
+    for message in workloads:
+        if message["execution_tier"] != "SV":
+            raise RuntimeError(
+                f"[RCC] S1 workload from UAV "
+                f"{message['uav_id']} "
+                f"was not processed at SV."
+            )
+
+        message["completion_epoch_s"] = (
+            message["rcc_received_epoch_s"]
+        )
+
+elif scenario == "S2":
     print(
         f"[RCC] Complete batch received. "
         f"Starting {num_uavs} concurrent "
@@ -360,7 +396,6 @@ rows, summary = save_results(
     workloads
 )
 
-print("", flush=True)
 print(
     "[RCC] ===== UCC END-TO-END RESULTS =====",
     flush=True,
@@ -382,11 +417,6 @@ for row in rows:
     )
 
 print(
-    "[RCC] ----------------------------------",
-    flush=True,
-)
-
-print(
     f"[RCC] T_max model    = "
     f"{summary['tmax_model_s']:.6f} s "
     f"(UAV {summary['tmax_model_uav']})",
@@ -404,12 +434,6 @@ print(
     f"[RCC] T_max error    = "
     f"{summary['tmax_error_s']:+.6f} s "
     f"({summary['tmax_error_pct']:+.3f}%)",
-    flush=True,
-)
-
-print(
-    f"[RCC] Results saved to "
-    f"{config['experiment']['results_dir']}/",
     flush=True,
 )
 

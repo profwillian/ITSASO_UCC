@@ -1,7 +1,6 @@
 import json
 import os
 import socket
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -33,7 +32,7 @@ def connect_with_retry(host, port, timeout=60):
             return sock
         except OSError:
             sock.close()
-            time.sleep(1)
+            time.sleep(0.2)
 
     raise RuntimeError(
         f"[SV] Could not connect to RCC at {host}:{port} "
@@ -114,8 +113,6 @@ expected_compute_time_s = (
     num_uavs * workload_cycles / sv_capacity_cycles_s
 )
 
-send_lock = threading.Lock()
-
 
 def process_at_sv(workload):
     message = workload["message"]
@@ -144,7 +141,7 @@ def process_at_sv(workload):
     }
 
 
-def transmit_backhaul(workload, rcc_sock):
+def transmit_backhaul(workload):
     message = workload["message"]
     payload = workload["payload"]
 
@@ -158,8 +155,24 @@ def transmit_backhaul(workload, rcc_sock):
         transmission_time_s + backhaul_fixed_delay_s
     )
 
+    # One independent TCP connection per UAV workload.
+    rcc_sock = connect_with_retry(
+        rcc_host,
+        rcc_port,
+    )
+
+    local_ip, local_port = rcc_sock.getsockname()
+    remote_ip, remote_port = rcc_sock.getpeername()
+
+    message["backhaul_tcp_source_port"] = local_port
+    message["backhaul_tcp_destination_port"] = remote_port
+
     start = time.perf_counter()
+
+    # Still using the controlled analytical delay.
+    # This will be removed only after tc is introduced.
     time.sleep(expected_backhaul_time_s)
+
     measured = time.perf_counter() - start
 
     message["backhaul_rate_mbps"] = (
@@ -176,14 +189,14 @@ def transmit_backhaul(workload, rcc_sock):
     )
     message["backhaul_measured_s"] = measured
     message["backhaul_payload_bytes_sent"] = len(payload)
-    message["rcc_delivery_epoch_s"] = time.time()
 
-    with send_lock:
-        send_frame(
-            rcc_sock,
-            message,
-            payload,
-        )
+    send_frame(
+        rcc_sock,
+        message,
+        payload,
+    )
+
+    rcc_sock.close()
 
     return workload
 
@@ -192,8 +205,6 @@ print(
     f"[SV] Starting SV node. Scenario={scenario}.",
     flush=True,
 )
-
-rcc_sock = connect_with_retry(rcc_host, rcc_port)
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -307,16 +318,6 @@ for workload in workloads:
 
     total_access_bytes += len(payload)
 
-    print(
-        f"[SV] Received UAV {message['uav_id']}: "
-        f"bytes={len(payload)}, "
-        f"access_expected="
-        f"{message['access_expected_s']:.6f} s, "
-        f"access_measured="
-        f"{message['access_measured_s']:.6f} s.",
-        flush=True,
-    )
-
 print(
     f"[SV] Access payload total received = "
     f"{total_access_bytes} bytes.",
@@ -359,27 +360,20 @@ else:
     )
 
 print(
-    f"[SV] Starting {num_uavs} concurrent "
-    f"backhaul flows.",
+    f"[SV] Starting {num_uavs} independent "
+    f"TCP backhaul flows.",
     flush=True,
 )
 
 backhaul_batch_start = time.perf_counter()
 
 with ThreadPoolExecutor(max_workers=num_uavs) as executor:
-    futures = [
-        executor.submit(
+    transmitted_workloads = list(
+        executor.map(
             transmit_backhaul,
-            workload,
-            rcc_sock,
+            workloads,
         )
-        for workload in workloads
-    ]
-
-    transmitted_workloads = [
-        future.result()
-        for future in futures
-    ]
+    )
 
 backhaul_batch_measured_s = (
     time.perf_counter() - backhaul_batch_start
@@ -395,6 +389,8 @@ for workload in transmitted_workloads:
 
     print(
         f"[SV] UAV {message['uav_id']} backhaul completed: "
+        f"tcp_source_port="
+        f"{message['backhaul_tcp_source_port']}, "
         f"bytes={message['backhaul_payload_bytes_sent']}, "
         f"expected={message['backhaul_expected_s']:.6f} s, "
         f"measured={message['backhaul_measured_s']:.6f} s.",
@@ -413,18 +409,6 @@ print(
     flush=True,
 )
 
-send_json_line(
-    rcc_sock,
-    {
-        "type": "END",
-        "scenario": scenario,
-        "source": "sv_node",
-        "workloads_forwarded":
-            len(transmitted_workloads),
-    },
-)
-
-rcc_sock.close()
 server.close()
 
 print(
