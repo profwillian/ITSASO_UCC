@@ -69,6 +69,61 @@ expected_access_time_s = (
     input_size_mbit / access_rate_mbps
 )
 
+sock = connect_with_retry(sv_host, sv_port)
+stream = sock.makefile("r")
+
+ready_message = {
+    "type": "READY",
+    "scenario": scenario,
+    "uav_id": uav_id,
+}
+
+sock.sendall(
+    (json.dumps(ready_message) + "\n").encode("utf-8")
+)
+
+print(
+    f"[UAV {uav_id}] READY sent to SV. "
+    f"Waiting for common START.",
+    flush=True,
+)
+
+line = stream.readline()
+
+if not line:
+    raise RuntimeError(
+        f"[UAV {uav_id}] SV closed the connection before START."
+    )
+
+start_message = json.loads(line)
+
+if start_message.get("type") != "START":
+    raise RuntimeError(
+        f"[UAV {uav_id}] Expected START message, "
+        f"received {start_message.get('type')}."
+    )
+
+if start_message["scenario"] != scenario:
+    raise RuntimeError(
+        f"[UAV {uav_id}] Scenario mismatch in START message."
+    )
+
+start_epoch_s = start_message["start_epoch_s"]
+
+print(
+    f"[UAV {uav_id}] START received. "
+    f"Common generation epoch={start_epoch_s:.6f}.",
+    flush=True,
+)
+
+remaining_s = start_epoch_s - time.time()
+
+if remaining_s > 0:
+    time.sleep(remaining_s)
+
+generated_epoch_s = time.time()
+generation_skew_s = generated_epoch_s - start_epoch_s
+
 message = {
     "type": "WORKLOAD",
     "scenario": scenario,
@@ -79,13 +134,15 @@ message = {
     "configured_access_rate_mbps": access_rate_mbps,
     "execution_tier": None,
     "generated_at": timestamp(),
-    "generated_epoch_s": time.time(),
+    "generated_epoch_s": generated_epoch_s,
+    "common_start_epoch_s": start_epoch_s,
+    "generation_skew_s": generation_skew_s,
 }
 
 print(
-    f"[UAV {uav_id}] Scenario={scenario}. "
-    f"Generated {message['workload_id']} "
-    f"with {input_size_mbit:.3f} Mbit.",
+    f"[UAV {uav_id}] Generated {message['workload_id']} "
+    f"at synchronized start. "
+    f"skew={generation_skew_s * 1000:.3f} ms.",
     flush=True,
 )
 
@@ -106,13 +163,9 @@ message["access_expected_s"] = expected_access_time_s
 message["access_measured_s"] = access_measured_s
 message["access_finished_at"] = timestamp()
 
-sock = connect_with_retry(sv_host, sv_port)
-
 sock.sendall(
     (json.dumps(message) + "\n").encode("utf-8")
 )
-
-sock.close()
 
 print(
     f"[UAV {uav_id}] Access completed: "
@@ -121,3 +174,6 @@ print(
     f"Workload delivered to SV.",
     flush=True,
 )
+
+stream.close()
+sock.close()

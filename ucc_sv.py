@@ -7,6 +7,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 
+START_LEAD_TIME_S = 0.5
+
+
 def timestamp():
     return datetime.now(timezone.utc).isoformat()
 
@@ -28,6 +31,32 @@ def connect_with_retry(host, port, timeout=60):
         f"[SV] Could not connect to RCC at {host}:{port} "
         f"within {timeout} seconds."
     )
+
+
+def receive_workload(connection):
+    conn = connection["socket"]
+    stream = connection["stream"]
+
+    line = stream.readline()
+
+    if not line:
+        raise RuntimeError(
+            f"[SV] UAV {connection['uav_id']} closed "
+            f"the connection before sending its workload."
+        )
+
+    message = json.loads(line)
+
+    if message.get("type") != "WORKLOAD":
+        raise RuntimeError(
+            f"[SV] Expected WORKLOAD from UAV "
+            f"{connection['uav_id']}."
+        )
+
+    message["sv_received_at"] = timestamp()
+    message["sv_received_epoch_s"] = time.time()
+
+    return message
 
 
 config_path = os.environ.get("CONFIG", "cnf/ucc_config.json")
@@ -174,46 +203,118 @@ server.bind(("0.0.0.0", sv_port))
 server.listen(num_uavs)
 
 print(
-    f"[SV] Listening for {num_uavs} UAVs on port {sv_port}.",
+    f"[SV] Waiting for READY from {num_uavs} UAVs.",
     flush=True,
 )
 
-workloads = []
+connections = []
+uav_ids = set()
 
-while len(workloads) < num_uavs:
+while len(connections) < num_uavs:
     conn, addr = server.accept()
+    stream = conn.makefile("r")
 
-    with conn.makefile("r") as stream:
-        line = stream.readline()
-
-    conn.close()
+    line = stream.readline()
 
     if not line:
+        stream.close()
+        conn.close()
         continue
 
-    message = json.loads(line)
+    ready = json.loads(line)
 
-    if message["scenario"] != scenario:
+    if ready.get("type") != "READY":
         raise RuntimeError(
-            f"[SV] Scenario mismatch: container={scenario}, "
-            f"message={message['scenario']}."
+            "[SV] Expected READY as first UAV message."
         )
 
-    message["sv_received_at"] = timestamp()
-    workloads.append(message)
+    if ready["scenario"] != scenario:
+        raise RuntimeError(
+            f"[SV] Scenario mismatch in READY from "
+            f"UAV {ready['uav_id']}."
+        )
+
+    uav_id = ready["uav_id"]
+
+    if uav_id in uav_ids:
+        raise RuntimeError(
+            f"[SV] Duplicate READY from UAV {uav_id}."
+        )
+
+    uav_ids.add(uav_id)
+
+    connections.append(
+        {
+            "uav_id": uav_id,
+            "socket": conn,
+            "stream": stream,
+        }
+    )
+
+    print(
+        f"[SV] READY received from UAV {uav_id}. "
+        f"Ready={len(connections)}/{num_uavs}.",
+        flush=True,
+    )
+
+start_epoch_s = time.time() + START_LEAD_TIME_S
+
+start_message = {
+    "type": "START",
+    "scenario": scenario,
+    "start_epoch_s": start_epoch_s,
+}
+
+encoded_start = (
+    json.dumps(start_message) + "\n"
+).encode("utf-8")
+
+print(
+    f"[SV] All UAVs READY. "
+    f"Common START scheduled at {start_epoch_s:.6f} "
+    f"(lead={START_LEAD_TIME_S:.3f} s).",
+    flush=True,
+)
+
+for connection in connections:
+    connection["socket"].sendall(encoded_start)
+
+print(
+    f"[SV] START sent to {num_uavs}/{num_uavs} UAVs.",
+    flush=True,
+)
+
+with ThreadPoolExecutor(max_workers=num_uavs) as executor:
+    workloads = list(
+        executor.map(receive_workload, connections)
+    )
+
+for connection in connections:
+    connection["stream"].close()
+    connection["socket"].close()
+
+workloads.sort(key=lambda message: message["uav_id"])
+
+for message in workloads:
+    if message["scenario"] != scenario:
+        raise RuntimeError(
+            f"[SV] Scenario mismatch in workload from "
+            f"UAV {message['uav_id']}."
+        )
 
     print(
         f"[SV] Received {message['workload_id']} from UAV "
         f"{message['uav_id']}. "
+        f"generation_skew="
+        f"{message['generation_skew_s'] * 1000:.3f} ms, "
         f"access_expected={message['access_expected_s']:.6f} s, "
-        f"access_measured={message['access_measured_s']:.6f} s. "
-        f"Batch={len(workloads)}/{num_uavs}.",
+        f"access_measured={message['access_measured_s']:.6f} s.",
         flush=True,
     )
 
 if scenario == "S1":
     print(
-        f"[SV] Complete batch received. "
+        f"[SV] Complete synchronized batch received. "
         f"Starting {num_uavs} concurrent inference workers.",
         flush=True,
     )
@@ -239,7 +340,7 @@ if scenario == "S1":
 
 else:
     print(
-        "[SV] Complete batch received. "
+        "[SV] Complete synchronized batch received. "
         "S2 selected: no inference at SV.",
         flush=True,
     )
@@ -253,7 +354,11 @@ backhaul_batch_start = time.perf_counter()
 
 with ThreadPoolExecutor(max_workers=num_uavs) as executor:
     futures = [
-        executor.submit(transmit_backhaul, message, rcc_sock)
+        executor.submit(
+            transmit_backhaul,
+            message,
+            rcc_sock
+        )
         for message in workloads
     ]
 
