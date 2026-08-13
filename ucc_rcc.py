@@ -1,6 +1,8 @@
 import json
 import os
 import socket
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 
@@ -24,13 +26,56 @@ if scenario not in valid_scenarios:
 
 host = "0.0.0.0"
 port = config["nodes"]["rcc"]["port"]
-expected_uavs = config["experiment"]["num_uavs"]
 
+num_uavs = config["experiment"]["num_uavs"]
+
+input_size_mbit = config["workload"]["input_size_mbit"]
 mu = config["workload"]["output_input_ratio"]
+c_inf = config["workload"]["computational_intensity_cycles_per_bit"]
+
+rcc_capacity_gcycles_s = config["computation"]["rcc_capacity_gcycles_per_s"]
+
+input_size_bits = input_size_mbit * 1e6
+workload_cycles = input_size_bits * c_inf
+rcc_capacity_cycles_s = rcc_capacity_gcycles_s * 1e9
+
+expected_compute_time_s = (
+    num_uavs * workload_cycles / rcc_capacity_cycles_s
+)
+
+
+def process_at_rcc(message):
+    start = time.perf_counter()
+
+    time.sleep(expected_compute_time_s)
+
+    measured = time.perf_counter() - start
+
+    output_size_mbit = (
+        message["input_size_mbit"] * mu
+    )
+
+    message["execution_tier"] = "RCC"
+    message["compute_expected_s"] = expected_compute_time_s
+    message["compute_measured_s"] = measured
+    message["current_payload_mbit"] = output_size_mbit
+    message["inference_finished_at"] = timestamp()
+
+    return message
+
 
 print(
     f"[RCC] Starting RCC node on port {port}. "
     f"Scenario={scenario}. Waiting for SV connection.",
+    flush=True,
+)
+
+print(
+    f"[RCC] Computation configuration: "
+    f"W={workload_cycles:.0f} cycles, "
+    f"capacity={rcc_capacity_gcycles_s:.3f} Gcycles/s, "
+    f"N={num_uavs}, "
+    f"expected_per_workload={expected_compute_time_s:.6f} s.",
     flush=True,
 )
 
@@ -46,7 +91,7 @@ print(
     flush=True,
 )
 
-received = 0
+workloads = []
 
 with conn.makefile("r") as stream:
     for line in stream:
@@ -65,63 +110,81 @@ with conn.makefile("r") as stream:
                 f"message={message['scenario']}."
             )
 
-        received += 1
         message["rcc_received_at"] = timestamp()
+        workloads.append(message)
 
         print(
             f"[RCC] Received {message['workload_id']} "
-            f"with {message['current_payload_mbit']:.3f} Mbit.",
-            flush=True,
-        )
-
-        if scenario == "S1":
-            if message["execution_tier"] != "SV":
-                raise RuntimeError(
-                    "[RCC] S1 workload did not execute at the SV."
-                )
-
-            print(
-                f"[RCC] Inference result from SV accepted for UAV "
-                f"{message['uav_id']}.",
-                flush=True,
-            )
-
-        elif scenario == "S2":
-            message["inference_started_at"] = timestamp()
-
-            output_size = (
-                message["input_size_mbit"] * mu
-            )
-
-            message["execution_tier"] = "RCC"
-            message["current_payload_mbit"] = output_size
-            message["inference_finished_at"] = timestamp()
-
-            print(
-                f"[RCC] INFERENCE executed for UAV "
-                f"{message['uav_id']}. "
-                f"Result size={output_size:.3f} Mbit.",
-                flush=True,
-            )
-
-        print(
-            f"[RCC] Workload complete: "
-            f"uav_id={message['uav_id']} "
-            f"execution_tier={message['execution_tier']}.",
+            f"with {message['current_payload_mbit']:.3f} Mbit. "
+            f"Batch={len(workloads)}/{num_uavs}.",
             flush=True,
         )
 
 conn.close()
 server.close()
 
-if received != expected_uavs:
+if len(workloads) != num_uavs:
     raise RuntimeError(
-        f"[RCC] Expected {expected_uavs} workloads, "
-        f"but received {received}."
+        f"[RCC] Expected {num_uavs} workloads, "
+        f"but received {len(workloads)}."
     )
+
+if scenario == "S1":
+    for message in workloads:
+        if message["execution_tier"] != "SV":
+            raise RuntimeError(
+                f"[RCC] S1 workload from UAV "
+                f"{message['uav_id']} was not processed at SV."
+            )
+
+        print(
+            f"[RCC] UAV {message['uav_id']} result accepted. "
+            f"execution_tier=SV, "
+            f"compute_expected="
+            f"{message['compute_expected_s']:.6f} s, "
+            f"compute_measured="
+            f"{message['compute_measured_s']:.6f} s.",
+            flush=True,
+        )
+
+elif scenario == "S2":
+    print(
+        f"[RCC] Complete batch received. "
+        f"Starting {num_uavs} concurrent inference workers.",
+        flush=True,
+    )
+
+    batch_start = time.perf_counter()
+
+    for message in workloads:
+        message["inference_started_at"] = timestamp()
+
+    with ThreadPoolExecutor(max_workers=num_uavs) as executor:
+        workloads = list(
+            executor.map(process_at_rcc, workloads)
+        )
+
+    batch_measured_s = time.perf_counter() - batch_start
+
+    print(
+        f"[RCC] Batch inference completed. "
+        f"expected={expected_compute_time_s:.6f} s, "
+        f"measured={batch_measured_s:.6f} s.",
+        flush=True,
+    )
+
+    for message in workloads:
+        print(
+            f"[RCC] UAV {message['uav_id']} inference complete: "
+            f"execution_tier=RCC, "
+            f"expected={message['compute_expected_s']:.6f} s, "
+            f"measured={message['compute_measured_s']:.6f} s, "
+            f"result={message['current_payload_mbit']:.3f} Mbit.",
+            flush=True,
+        )
 
 print(
     f"[RCC] Completed successfully. "
-    f"Received {received}/{expected_uavs} workloads.",
+    f"Received {len(workloads)}/{num_uavs} workloads.",
     flush=True,
 )
