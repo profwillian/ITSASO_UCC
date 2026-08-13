@@ -63,6 +63,11 @@ sv_host = config["nodes"]["sv"]["host"]
 sv_port = config["nodes"]["sv"]["port"]
 
 input_size_mbit = config["workload"]["input_size_mbit"]
+access_rate_mbps = rates[uav_id - 1]
+
+expected_access_time_s = (
+    input_size_mbit / access_rate_mbps
+)
 
 message = {
     "type": "WORKLOAD",
@@ -71,9 +76,10 @@ message = {
     "workload_id": f"uav{uav_id}-workload1",
     "input_size_mbit": input_size_mbit,
     "current_payload_mbit": input_size_mbit,
-    "configured_access_rate_mbps": rates[uav_id - 1],
+    "configured_access_rate_mbps": access_rate_mbps,
     "execution_tier": None,
     "generated_at": timestamp(),
+    "generated_epoch_s": time.time(),
 }
 
 print(
@@ -83,13 +89,24 @@ print(
     flush=True,
 )
 
-sock = connect_with_retry(sv_host, sv_port)
-
 print(
-    f"[UAV {uav_id}] Connected to SV at "
-    f"{sv_host}:{sv_port}.",
+    f"[UAV {uav_id}] Access transmission: "
+    f"rate={access_rate_mbps:.3f} Mbit/s, "
+    f"expected={expected_access_time_s:.6f} s.",
     flush=True,
 )
+
+access_start = time.perf_counter()
+
+time.sleep(expected_access_time_s)
+
+access_measured_s = time.perf_counter() - access_start
+
+message["access_expected_s"] = expected_access_time_s
+message["access_measured_s"] = access_measured_s
+message["access_finished_at"] = timestamp()
+
+sock = connect_with_retry(sv_host, sv_port)
 
 sock.sendall(
     (json.dumps(message) + "\n").encode("utf-8")
@@ -98,6 +115,9 @@ sock.sendall(
 sock.close()
 
 print(
-    f"[UAV {uav_id}] Input workload sent to SV. Finished.",
+    f"[UAV {uav_id}] Access completed: "
+    f"expected={expected_access_time_s:.6f} s, "
+    f"measured={access_measured_s:.6f} s. "
+    f"Workload delivered to SV.",
     flush=True,
 )
