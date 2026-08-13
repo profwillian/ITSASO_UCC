@@ -11,7 +11,7 @@ from pathlib import Path
 CONFIG_PATH = Path("cnf/ucc_config.json")
 RESULTS_DIR = Path("res_ucc")
 
-F1_VALUES = [
+DEFAULT_F1_VALUES = [
     2.0,
     10.0,
     50.0,
@@ -21,11 +21,7 @@ F1_VALUES = [
 
 def write_config(config):
     CONFIG_PATH.write_text(
-        json.dumps(
-            config,
-            indent=2,
-        )
-        + "\n",
+        json.dumps(config, indent=2) + "\n",
         encoding="utf-8",
     )
 
@@ -57,9 +53,7 @@ def run_pilot(runs, timeout):
     for line in process.stdout:
         print(line, end="")
 
-        match = pattern.search(
-            line.strip()
-        )
+        match = pattern.search(line.strip())
 
         if match:
             campaign_dir = Path(
@@ -75,8 +69,7 @@ def run_pilot(runs, timeout):
 
     if campaign_dir is None:
         raise RuntimeError(
-            "Could not determine pilot "
-            "campaign directory."
+            "Could not determine pilot campaign directory."
         )
 
     if not campaign_dir.exists():
@@ -90,8 +83,7 @@ def run_pilot(runs, timeout):
 
 def load_aggregate(campaign_dir):
     aggregate_path = (
-        campaign_dir
-        / "aggregate.json"
+        campaign_dir / "aggregate.json"
     )
 
     with open(
@@ -136,6 +128,22 @@ def write_csv(path, rows):
         writer.writerows(rows)
 
 
+def parse_values(values):
+    parsed = []
+
+    for value in values:
+        number = float(value)
+
+        if number <= 0:
+            raise ValueError(
+                "All f1 values must be > 0."
+            )
+
+        parsed.append(number)
+
+    return parsed
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=(
@@ -164,6 +172,19 @@ def main():
         ),
     )
 
+    parser.add_argument(
+        "--values",
+        nargs="+",
+        default=[
+            str(value)
+            for value in DEFAULT_F1_VALUES
+        ],
+        help=(
+            "SV capacities in Gcycles/s. "
+            "Example: --values 4 5 5.5 6 7"
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.runs < 1:
@@ -171,12 +192,12 @@ def main():
             "--runs must be >= 1"
         )
 
-    original_text = CONFIG_PATH.read_text(
-        encoding="utf-8"
+    f1_values = parse_values(
+        args.values
     )
 
-    original_config = json.loads(
-        original_text
+    original_text = CONFIG_PATH.read_text(
+        encoding="utf-8"
     )
 
     timestamp = datetime.now().strftime(
@@ -196,12 +217,17 @@ def main():
     rows = []
 
     print(
+        f"[SWEEP] f1 values: "
+        f"{f1_values}"
+    )
+
+    print(
         f"[SWEEP] Results directory: "
         f"{sweep_dir}"
     )
 
     try:
-        for f1 in F1_VALUES:
+        for f1 in f1_values:
             print("")
             print(
                 "[SWEEP] =============================="
@@ -262,6 +288,16 @@ def main():
                 ],
             )
 
+            model_gap_s = (
+                s1["tmax_model_s"]
+                - s2["tmax_model_s"]
+            )
+
+            emulated_gap_s = (
+                s1["tmax_emulated_mean_s"]
+                - s2["tmax_emulated_mean_s"]
+            )
+
             row = {
                 "f1_gcycles_s":
                     f1,
@@ -299,6 +335,12 @@ def main():
                         "tmax_emulated_std_s"
                     ],
 
+                "model_gap_s":
+                    model_gap_s,
+
+                "emulated_gap_s":
+                    emulated_gap_s,
+
                 "preferred_model":
                     model_preferred,
 
@@ -321,6 +363,13 @@ def main():
             )
 
             print(
+                f"[SWEEP] model gap="
+                f"{model_gap_s:+.6f} s, "
+                f"emulated gap="
+                f"{emulated_gap_s:+.6f} s"
+            )
+
+            print(
                 f"[SWEEP] preferred model="
                 f"{model_preferred}, "
                 f"preferred emulated="
@@ -335,8 +384,7 @@ def main():
 
         print("")
         print(
-            "[SWEEP] Original configuration "
-            "restored."
+            "[SWEEP] Original configuration restored."
         )
 
     csv_path = (
@@ -381,6 +429,10 @@ def main():
             f"{row['s1_tmax_emulated_mean_s']:.6f} | "
             f"S2_emulated="
             f"{row['s2_tmax_emulated_mean_s']:.6f} | "
+            f"model_gap="
+            f"{row['model_gap_s']:+.6f} | "
+            f"emulated_gap="
+            f"{row['emulated_gap_s']:+.6f} | "
             f"model={row['preferred_model']} | "
             f"emulated={row['preferred_emulated']}"
         )
