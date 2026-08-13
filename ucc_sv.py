@@ -6,6 +6,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+from ucc_protocol import (
+    mbit_to_bytes,
+    read_frame,
+    read_json_line,
+    send_frame,
+    send_json_line,
+)
+
 
 START_LEAD_TIME_S = 0.5
 
@@ -34,29 +42,28 @@ def connect_with_retry(host, port, timeout=60):
 
 
 def receive_workload(connection):
-    conn = connection["socket"]
-    stream = connection["stream"]
+    metadata, payload = read_frame(connection["stream"])
 
-    line = stream.readline()
-
-    if not line:
+    if metadata is None:
         raise RuntimeError(
             f"[SV] UAV {connection['uav_id']} closed "
             f"the connection before sending its workload."
         )
 
-    message = json.loads(line)
-
-    if message.get("type") != "WORKLOAD":
+    if metadata.get("type") != "WORKLOAD":
         raise RuntimeError(
-            f"[SV] Expected WORKLOAD from UAV "
-            f"{connection['uav_id']}."
+            f"[SV] Expected WORKLOAD from "
+            f"UAV {connection['uav_id']}."
         )
 
-    message["sv_received_at"] = timestamp()
-    message["sv_received_epoch_s"] = time.time()
+    metadata["sv_received_at"] = timestamp()
+    metadata["sv_received_epoch_s"] = time.time()
+    metadata["access_payload_bytes_received"] = len(payload)
 
-    return message
+    return {
+        "message": metadata,
+        "payload": payload,
+    }
 
 
 config_path = os.environ.get("CONFIG", "cnf/ucc_config.json")
@@ -110,15 +117,19 @@ expected_compute_time_s = (
 send_lock = threading.Lock()
 
 
-def process_at_sv(message):
+def process_at_sv(workload):
+    message = workload["message"]
+
     start = time.perf_counter()
-
     time.sleep(expected_compute_time_s)
-
     measured = time.perf_counter() - start
 
     output_size_mbit = (
         message["input_size_mbit"] * mu
+    )
+
+    output_payload = bytes(
+        mbit_to_bytes(output_size_mbit)
     )
 
     message["execution_tier"] = "SV"
@@ -127,10 +138,16 @@ def process_at_sv(message):
     message["current_payload_mbit"] = output_size_mbit
     message["inference_finished_at"] = timestamp()
 
-    return message
+    return {
+        "message": message,
+        "payload": output_payload,
+    }
 
 
-def transmit_backhaul(message, rcc_sock):
+def transmit_backhaul(workload, rcc_sock):
+    message = workload["message"]
+    payload = workload["payload"]
+
     payload_mbit = message["current_payload_mbit"]
 
     transmission_time_s = (
@@ -142,9 +159,7 @@ def transmit_backhaul(message, rcc_sock):
     )
 
     start = time.perf_counter()
-
     time.sleep(expected_backhaul_time_s)
-
     measured = time.perf_counter() - start
 
     message["backhaul_rate_mbps"] = (
@@ -160,42 +175,25 @@ def transmit_backhaul(message, rcc_sock):
         expected_backhaul_time_s
     )
     message["backhaul_measured_s"] = measured
+    message["backhaul_payload_bytes_sent"] = len(payload)
     message["rcc_delivery_epoch_s"] = time.time()
 
-    encoded = (json.dumps(message) + "\n").encode("utf-8")
-
     with send_lock:
-        rcc_sock.sendall(encoded)
+        send_frame(
+            rcc_sock,
+            message,
+            payload,
+        )
 
-    return message
+    return workload
 
-
-print(
-    f"[SV] Starting SV node. Scenario={scenario}. "
-    f"Connecting to RCC at {rcc_host}:{rcc_port}.",
-    flush=True,
-)
 
 print(
-    f"[SV] Computation configuration: "
-    f"W={workload_cycles:.0f} cycles, "
-    f"capacity={sv_capacity_gcycles_s:.3f} Gcycles/s, "
-    f"N={num_uavs}, "
-    f"expected_per_workload={expected_compute_time_s:.6f} s.",
-    flush=True,
-)
-
-print(
-    f"[SV] Backhaul configuration: "
-    f"Cbh={backhaul_capacity_mbps:.3f} Mbit/s, "
-    f"per_flow={per_flow_backhaul_rate_mbps:.6f} Mbit/s, "
-    f"fixed_delay={backhaul_fixed_delay_s:.6f} s.",
+    f"[SV] Starting SV node. Scenario={scenario}.",
     flush=True,
 )
 
 rcc_sock = connect_with_retry(rcc_host, rcc_port)
-
-print("[SV] Connected to RCC.", flush=True)
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -212,16 +210,14 @@ uav_ids = set()
 
 while len(connections) < num_uavs:
     conn, addr = server.accept()
-    stream = conn.makefile("r")
+    stream = conn.makefile("rb")
 
-    line = stream.readline()
+    ready = read_json_line(stream)
 
-    if not line:
+    if ready is None:
         stream.close()
         conn.close()
         continue
-
-    ready = json.loads(line)
 
     if ready.get("type") != "READY":
         raise RuntimeError(
@@ -230,8 +226,7 @@ while len(connections) < num_uavs:
 
     if ready["scenario"] != scenario:
         raise RuntimeError(
-            f"[SV] Scenario mismatch in READY from "
-            f"UAV {ready['uav_id']}."
+            "[SV] Scenario mismatch in READY."
         )
 
     uav_id = ready["uav_id"]
@@ -265,19 +260,11 @@ start_message = {
     "start_epoch_s": start_epoch_s,
 }
 
-encoded_start = (
-    json.dumps(start_message) + "\n"
-).encode("utf-8")
-
-print(
-    f"[SV] All UAVs READY. "
-    f"Common START scheduled at {start_epoch_s:.6f} "
-    f"(lead={START_LEAD_TIME_S:.3f} s).",
-    flush=True,
-)
-
 for connection in connections:
-    connection["socket"].sendall(encoded_start)
+    send_json_line(
+        connection["socket"],
+        start_message,
+    )
 
 print(
     f"[SV] START sent to {num_uavs}/{num_uavs} UAVs.",
@@ -286,50 +273,76 @@ print(
 
 with ThreadPoolExecutor(max_workers=num_uavs) as executor:
     workloads = list(
-        executor.map(receive_workload, connections)
+        executor.map(
+            receive_workload,
+            connections,
+        )
     )
 
 for connection in connections:
     connection["stream"].close()
     connection["socket"].close()
 
-workloads.sort(key=lambda message: message["uav_id"])
+workloads.sort(
+    key=lambda workload:
+        workload["message"]["uav_id"]
+)
 
-for message in workloads:
-    if message["scenario"] != scenario:
+expected_access_bytes = mbit_to_bytes(
+    input_size_mbit
+)
+
+total_access_bytes = 0
+
+for workload in workloads:
+    message = workload["message"]
+    payload = workload["payload"]
+
+    if len(payload) != expected_access_bytes:
         raise RuntimeError(
-            f"[SV] Scenario mismatch in workload from "
-            f"UAV {message['uav_id']}."
+            f"[SV] UAV {message['uav_id']} payload mismatch: "
+            f"expected={expected_access_bytes}, "
+            f"received={len(payload)}."
         )
 
+    total_access_bytes += len(payload)
+
     print(
-        f"[SV] Received {message['workload_id']} from UAV "
-        f"{message['uav_id']}. "
-        f"generation_skew="
-        f"{message['generation_skew_s'] * 1000:.3f} ms, "
-        f"access_expected={message['access_expected_s']:.6f} s, "
-        f"access_measured={message['access_measured_s']:.6f} s.",
+        f"[SV] Received UAV {message['uav_id']}: "
+        f"bytes={len(payload)}, "
+        f"access_expected="
+        f"{message['access_expected_s']:.6f} s, "
+        f"access_measured="
+        f"{message['access_measured_s']:.6f} s.",
         flush=True,
     )
 
+print(
+    f"[SV] Access payload total received = "
+    f"{total_access_bytes} bytes.",
+    flush=True,
+)
+
 if scenario == "S1":
     print(
-        f"[SV] Complete synchronized batch received. "
-        f"Starting {num_uavs} concurrent inference workers.",
+        f"[SV] Starting {num_uavs} concurrent "
+        f"inference workers.",
         flush=True,
     )
 
     batch_start = time.perf_counter()
 
-    for message in workloads:
-        message["inference_started_at"] = timestamp()
-
     with ThreadPoolExecutor(max_workers=num_uavs) as executor:
         workloads = list(
-            executor.map(process_at_sv, workloads)
+            executor.map(
+                process_at_sv,
+                workloads,
+            )
         )
 
-    batch_measured_s = time.perf_counter() - batch_start
+    batch_measured_s = (
+        time.perf_counter() - batch_start
+    )
 
     print(
         f"[SV] Batch inference completed. "
@@ -340,13 +353,14 @@ if scenario == "S1":
 
 else:
     print(
-        "[SV] Complete synchronized batch received. "
-        "S2 selected: no inference at SV.",
+        "[SV] S2 selected: preserving full input "
+        "payload for RCC.",
         flush=True,
     )
 
 print(
-    f"[SV] Starting {num_uavs} concurrent backhaul flows.",
+    f"[SV] Starting {num_uavs} concurrent "
+    f"backhaul flows.",
     flush=True,
 )
 
@@ -356,28 +370,42 @@ with ThreadPoolExecutor(max_workers=num_uavs) as executor:
     futures = [
         executor.submit(
             transmit_backhaul,
-            message,
-            rcc_sock
+            workload,
+            rcc_sock,
         )
-        for message in workloads
+        for workload in workloads
     ]
 
     transmitted_workloads = [
-        future.result() for future in futures
+        future.result()
+        for future in futures
     ]
 
 backhaul_batch_measured_s = (
     time.perf_counter() - backhaul_batch_start
 )
 
-for message in transmitted_workloads:
+total_backhaul_bytes = sum(
+    len(workload["payload"])
+    for workload in transmitted_workloads
+)
+
+for workload in transmitted_workloads:
+    message = workload["message"]
+
     print(
         f"[SV] UAV {message['uav_id']} backhaul completed: "
-        f"payload={message['current_payload_mbit']:.3f} Mbit, "
+        f"bytes={message['backhaul_payload_bytes_sent']}, "
         f"expected={message['backhaul_expected_s']:.6f} s, "
         f"measured={message['backhaul_measured_s']:.6f} s.",
         flush=True,
     )
+
+print(
+    f"[SV] Backhaul payload total sent = "
+    f"{total_backhaul_bytes} bytes.",
+    flush=True,
+)
 
 print(
     f"[SV] Backhaul batch completed in "
@@ -385,15 +413,15 @@ print(
     flush=True,
 )
 
-end_message = {
-    "type": "END",
-    "scenario": scenario,
-    "source": "sv_node",
-    "workloads_forwarded": len(transmitted_workloads),
-}
-
-rcc_sock.sendall(
-    (json.dumps(end_message) + "\n").encode("utf-8")
+send_json_line(
+    rcc_sock,
+    {
+        "type": "END",
+        "scenario": scenario,
+        "source": "sv_node",
+        "workloads_forwarded":
+            len(transmitted_workloads),
+    },
 )
 
 rcc_sock.close()
@@ -401,6 +429,7 @@ server.close()
 
 print(
     f"[SV] Completed successfully. "
-    f"Forwarded {len(transmitted_workloads)}/{num_uavs} workloads.",
+    f"Forwarded {len(transmitted_workloads)}/{num_uavs} "
+    f"workloads.",
     flush=True,
 )

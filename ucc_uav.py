@@ -4,6 +4,13 @@ import socket
 import time
 from datetime import datetime, timezone
 
+from ucc_protocol import (
+    mbit_to_bytes,
+    read_json_line,
+    send_frame,
+    send_json_line,
+)
+
 
 def timestamp():
     return datetime.now(timezone.utc).isoformat()
@@ -65,12 +72,14 @@ sv_port = config["nodes"]["sv"]["port"]
 input_size_mbit = config["workload"]["input_size_mbit"]
 access_rate_mbps = rates[uav_id - 1]
 
+payload_size_bytes = mbit_to_bytes(input_size_mbit)
+
 expected_access_time_s = (
     input_size_mbit / access_rate_mbps
 )
 
 sock = connect_with_retry(sv_host, sv_port)
-stream = sock.makefile("r")
+stream = sock.makefile("rb")
 
 ready_message = {
     "type": "READY",
@@ -78,9 +87,7 @@ ready_message = {
     "uav_id": uav_id,
 }
 
-sock.sendall(
-    (json.dumps(ready_message) + "\n").encode("utf-8")
-)
+send_json_line(sock, ready_message)
 
 print(
     f"[UAV {uav_id}] READY sent to SV. "
@@ -88,14 +95,12 @@ print(
     flush=True,
 )
 
-line = stream.readline()
+start_message = read_json_line(stream)
 
-if not line:
+if start_message is None:
     raise RuntimeError(
         f"[UAV {uav_id}] SV closed the connection before START."
     )
-
-start_message = json.loads(line)
 
 if start_message.get("type") != "START":
     raise RuntimeError(
@@ -109,12 +114,6 @@ if start_message["scenario"] != scenario:
     )
 
 start_epoch_s = start_message["start_epoch_s"]
-
-print(
-    f"[UAV {uav_id}] START received. "
-    f"Common generation epoch={start_epoch_s:.6f}.",
-    flush=True,
-)
 
 remaining_s = start_epoch_s - time.time()
 
@@ -148,6 +147,7 @@ print(
 
 print(
     f"[UAV {uav_id}] Access transmission: "
+    f"payload={payload_size_bytes} bytes, "
     f"rate={access_rate_mbps:.3f} Mbit/s, "
     f"expected={expected_access_time_s:.6f} s.",
     flush=True,
@@ -163,15 +163,16 @@ message["access_expected_s"] = expected_access_time_s
 message["access_measured_s"] = access_measured_s
 message["access_finished_at"] = timestamp()
 
-sock.sendall(
-    (json.dumps(message) + "\n").encode("utf-8")
-)
+# Synthetic content, but real bytes transmitted through TCP.
+payload = bytes(payload_size_bytes)
+
+send_frame(sock, message, payload)
 
 print(
     f"[UAV {uav_id}] Access completed: "
     f"expected={expected_access_time_s:.6f} s, "
-    f"measured={access_measured_s:.6f} s. "
-    f"Workload delivered to SV.",
+    f"measured={access_measured_s:.6f} s, "
+    f"bytes_sent={len(payload)}.",
     flush=True,
 )
 

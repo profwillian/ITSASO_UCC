@@ -6,6 +6,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
+from ucc_protocol import mbit_to_bytes, read_frame
+
 
 def timestamp():
     return datetime.now(timezone.utc).isoformat()
@@ -241,9 +243,12 @@ print(
 
 workloads = []
 
-with conn.makefile("r") as stream:
-    for line in stream:
-        message = json.loads(line)
+with conn.makefile("rb") as stream:
+    while True:
+        message, payload = read_frame(stream)
+
+        if message is None:
+            break
 
         if message.get("type") == "END":
             print(
@@ -274,18 +279,43 @@ with conn.makefile("r") as stream:
                 message["rcc_received_epoch_s"]
             )
 
+        expected_payload_bytes = mbit_to_bytes(
+            message["current_payload_mbit"]
+        )
+
+        if len(payload) != expected_payload_bytes:
+            raise RuntimeError(
+                f"[RCC] Payload mismatch for UAV "
+                f"{message['uav_id']}: "
+                f"expected={expected_payload_bytes}, "
+                f"received={len(payload)}."
+            )
+
+        message["backhaul_payload_bytes_received"] = len(payload)
+
         workloads.append(message)
 
         print(
             f"[RCC] Received {message['workload_id']} "
-            f"with "
-            f"{message['current_payload_mbit']:.3f} Mbit. "
+            f"with {len(payload)} bytes "
+            f"({message['current_payload_mbit']:.3f} Mbit). "
             f"Batch={len(workloads)}/{num_uavs}.",
             flush=True,
         )
 
 conn.close()
 server.close()
+
+total_backhaul_bytes_received = sum(
+    message["backhaul_payload_bytes_received"]
+    for message in workloads
+)
+
+print(
+    f"[RCC] Backhaul payload total received = "
+    f"{total_backhaul_bytes_received} bytes.",
+    flush=True,
+)
 
 if len(workloads) != num_uavs:
     raise RuntimeError(
