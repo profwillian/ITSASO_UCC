@@ -1,0 +1,18 @@
+FROM python:3.10-slim-bookworm
+
+LABEL maintainer="UCC 2026"
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        iproute2 \
+        iputils-ping && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /home
+
+COPY . .
+
+ENV CONFIG=cnf/ucc_config.json
+ENV UAV_ID=1
+
+CMD ["python3", "ucc_uav.py"]

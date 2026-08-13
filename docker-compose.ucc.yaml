@@ -1,0 +1,91 @@
+services:
+
+  rcc_node:
+    build:
+      context: .
+      dockerfile: DockerfileRCC
+    image: ucc_rcc_node
+    container_name: rcc_node
+    privileged: true
+    environment:
+      - CONFIG=cnf/ucc_config.json
+    volumes:
+      - ./:/home/
+    networks:
+      - ucc_backhaul_net
+
+  sv_node:
+    build:
+      context: .
+      dockerfile: DockerfileSV
+    image: ucc_sv_node
+    container_name: sv_node
+    privileged: true
+    environment:
+      - CONFIG=cnf/ucc_config.json
+    volumes:
+      - ./:/home/
+    networks:
+      - ucc_access_net
+      - ucc_backhaul_net
+    depends_on:
+      - rcc_node
+
+  uav_node_1:
+    build:
+      context: .
+      dockerfile: DockerfileUAV
+    image: ucc_uav_node
+    container_name: uav_node_1
+    privileged: true
+    environment:
+      - CONFIG=cnf/ucc_config.json
+      - UAV_ID=1
+    volumes:
+      - ./:/home/
+    networks:
+      - ucc_access_net
+    depends_on:
+      - sv_node
+
+  uav_node_2:
+    build:
+      context: .
+      dockerfile: DockerfileUAV
+    image: ucc_uav_node
+    container_name: uav_node_2
+    privileged: true
+    environment:
+      - CONFIG=cnf/ucc_config.json
+      - UAV_ID=2
+    volumes:
+      - ./:/home/
+    networks:
+      - ucc_access_net
+    depends_on:
+      - sv_node
+
+  uav_node_3:
+    build:
+      context: .
+      dockerfile: DockerfileUAV
+    image: ucc_uav_node
+    container_name: uav_node_3
+    privileged: true
+    environment:
+      - CONFIG=cnf/ucc_config.json
+      - UAV_ID=3
+    volumes:
+      - ./:/home/
+    networks:
+      - ucc_access_net
+    depends_on:
+      - sv_node
+
+networks:
+
+  ucc_access_net:
+    name: ucc_access_net
+
+  ucc_backhaul_net:
+    name: ucc_backhaul_net
