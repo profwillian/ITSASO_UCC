@@ -11,6 +11,8 @@ from ucc_protocol import (
     send_json_line,
 )
 
+from ucc_tc import configure_netem
+
 
 def timestamp():
     return datetime.now(timezone.utc).isoformat()
@@ -27,7 +29,7 @@ def connect_with_retry(host, port, timeout=60):
             return sock
         except OSError:
             sock.close()
-            time.sleep(1)
+            time.sleep(0.2)
 
     raise RuntimeError(
         f"[UAV] Could not connect to SV at {host}:{port} "
@@ -35,7 +37,11 @@ def connect_with_retry(host, port, timeout=60):
     )
 
 
-config_path = os.environ.get("CONFIG", "cnf/ucc_config.json")
+config_path = os.environ.get(
+    "CONFIG",
+    "cnf/ucc_config.json"
+)
+
 scenario = os.environ.get("SCENARIO", "S1")
 uav_id = int(os.environ["UAV_ID"])
 
@@ -78,8 +84,27 @@ expected_access_time_s = (
     input_size_mbit / access_rate_mbps
 )
 
-sock = connect_with_retry(sv_host, sv_port)
-stream = sock.makefile("rb")
+# Allocate the synthetic payload before the synchronized start
+# so allocation time does not contaminate the network measurement.
+payload = bytes(payload_size_bytes)
+
+sock = connect_with_retry(
+    sv_host,
+    sv_port,
+)
+
+tc_result = configure_netem(
+    peer_host=sv_host,
+    rate_mbps=access_rate_mbps,
+    delay_ms=0.0,
+)
+
+print(
+    f"[UAV {uav_id}] TC configured: "
+    f"interface={tc_result['interface']}, "
+    f"rate={tc_result['rate_mbps']:.3f} Mbit/s.",
+    flush=True,
+)
 
 ready_message = {
     "type": "READY",
@@ -87,7 +112,12 @@ ready_message = {
     "uav_id": uav_id,
 }
 
-send_json_line(sock, ready_message)
+send_json_line(
+    sock,
+    ready_message,
+)
+
+stream = sock.makefile("rb")
 
 print(
     f"[UAV {uav_id}] READY sent to SV. "
@@ -136,6 +166,7 @@ message = {
     "generated_epoch_s": generated_epoch_s,
     "common_start_epoch_s": start_epoch_s,
     "generation_skew_s": generation_skew_s,
+    "access_expected_s": expected_access_time_s,
 }
 
 print(
@@ -146,33 +177,32 @@ print(
 )
 
 print(
-    f"[UAV {uav_id}] Access transmission: "
-    f"payload={payload_size_bytes} bytes, "
-    f"rate={access_rate_mbps:.3f} Mbit/s, "
-    f"expected={expected_access_time_s:.6f} s.",
+    f"[UAV {uav_id}] Sending real TCP payload: "
+    f"bytes={payload_size_bytes}, "
+    f"configured_rate={access_rate_mbps:.3f} Mbit/s, "
+    f"model_access={expected_access_time_s:.6f} s.",
     flush=True,
 )
 
-access_start = time.perf_counter()
+message["access_send_start_epoch_s"] = time.time()
 
-time.sleep(expected_access_time_s)
+local_send_start = time.perf_counter()
 
-access_measured_s = time.perf_counter() - access_start
+send_frame(
+    sock,
+    message,
+    payload,
+)
 
-message["access_expected_s"] = expected_access_time_s
-message["access_measured_s"] = access_measured_s
-message["access_finished_at"] = timestamp()
-
-# Synthetic content, but real bytes transmitted through TCP.
-payload = bytes(payload_size_bytes)
-
-send_frame(sock, message, payload)
+local_send_call_s = (
+    time.perf_counter() - local_send_start
+)
 
 print(
-    f"[UAV {uav_id}] Access completed: "
-    f"expected={expected_access_time_s:.6f} s, "
-    f"measured={access_measured_s:.6f} s, "
-    f"bytes_sent={len(payload)}.",
+    f"[UAV {uav_id}] TCP send call returned: "
+    f"bytes={len(payload)}, "
+    f"local_send_call={local_send_call_s:.6f} s. "
+    f"Actual access completion will be measured at SV.",
     flush=True,
 )
 
