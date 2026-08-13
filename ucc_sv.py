@@ -19,6 +19,7 @@ from ucc_tc import configure_netem
 
 START_LEAD_TIME_S = 0.5
 BACKHAUL_ACK_TIMEOUT_S = 15.0
+BACKHAUL_BARRIER_TIMEOUT_S = 5.0
 
 
 def timestamp():
@@ -90,6 +91,7 @@ scenario = os.environ.get(
 with open(config_path, "r") as f:
     config = json.load(f)
 
+
 valid_scenarios = config["experiment"]["scenarios"]
 
 if scenario not in valid_scenarios:
@@ -97,6 +99,7 @@ if scenario not in valid_scenarios:
         f"Scenario {scenario} is not valid. "
         f"Available scenarios: {valid_scenarios}"
     )
+
 
 sv_port = config["nodes"]["sv"]["port"]
 
@@ -161,9 +164,7 @@ def process_at_sv(workload):
     # Computation remains model-controlled.
     time.sleep(expected_compute_time_s)
 
-    measured = (
-        time.perf_counter() - start
-    )
+    measured = time.perf_counter() - start
 
     output_size_mbit = (
         message["input_size_mbit"] * mu
@@ -185,9 +186,7 @@ def process_at_sv(workload):
         output_size_mbit
     )
 
-    message["inference_finished_at"] = (
-        timestamp()
-    )
+    message["inference_finished_at"] = timestamp()
 
     return {
         "message": message,
@@ -195,31 +194,105 @@ def process_at_sv(workload):
     }
 
 
-def configure_backhaul_tc():
-    result = configure_netem(
-        peer_host=rcc_host,
-        rate_mbps=backhaul_capacity_mbps,
-        delay_ms=backhaul_fixed_delay_ms,
+print(
+    f"[SV] Starting SV node. "
+    f"Scenario={scenario}.",
+    flush=True,
+)
+
+
+# ---------------------------------------------------------
+# BACKHAUL INFRASTRUCTURE SETUP
+#
+# This phase is intentionally completed BEFORE workload
+# generation and therefore remains outside the E2E latency.
+# ---------------------------------------------------------
+
+setup_start = time.perf_counter()
+
+print(
+    f"[SV] Pre-establishing {num_uavs} "
+    f"backhaul TCP channels before START.",
+    flush=True,
+)
+
+backhaul_channels = []
+
+for channel_id in range(1, num_uavs + 1):
+    sock = connect_with_retry(
+        rcc_host,
+        rcc_port,
+    )
+
+    sock.settimeout(
+        BACKHAUL_ACK_TIMEOUT_S
+    )
+
+    local_ip, local_port = (
+        sock.getsockname()
+    )
+
+    remote_ip, remote_port = (
+        sock.getpeername()
+    )
+
+    backhaul_channels.append(
+        {
+            "channel_id": channel_id,
+            "socket": sock,
+            "local_ip": local_ip,
+            "local_port": local_port,
+            "remote_ip": remote_ip,
+            "remote_port": remote_port,
+        }
     )
 
     print(
-        f"[SV] TC backhaul configured: "
-        f"interface={result['interface']}, "
-        f"aggregate_rate={result['rate_mbps']:.3f} Mbit/s, "
-        f"delay={result['delay_ms']:.3f} ms.",
+        f"[SV] Backhaul channel {channel_id}/{num_uavs} "
+        f"established: "
+        f"{local_ip}:{local_port} -> "
+        f"{remote_ip}:{remote_port}.",
         flush=True,
     )
 
 
-backhaul_barrier = threading.Barrier(
-    num_uavs,
-    action=configure_backhaul_tc,
+tc_result = configure_netem(
+    peer_host=rcc_host,
+    rate_mbps=backhaul_capacity_mbps,
+    delay_ms=backhaul_fixed_delay_ms,
+)
+
+print(
+    f"[SV] TC backhaul configured before START: "
+    f"interface={tc_result['interface']}, "
+    f"aggregate_rate={tc_result['rate_mbps']:.3f} Mbit/s, "
+    f"delay={tc_result['delay_ms']:.3f} ms.",
+    flush=True,
+)
+
+setup_elapsed_s = (
+    time.perf_counter() - setup_start
+)
+
+print(
+    f"[SV] Backhaul infrastructure ready. "
+    f"setup_time={setup_elapsed_s:.6f} s "
+    f"(excluded from E2E latency).",
+    flush=True,
 )
 
 
-def transmit_backhaul(workload):
+# Barrier now synchronizes ONLY transmission.
+backhaul_barrier = threading.Barrier(
+    num_uavs
+)
+
+
+def transmit_backhaul(workload, channel):
     message = workload["message"]
     payload = workload["payload"]
+
+    rcc_sock = channel["socket"]
 
     payload_mbit = (
         message["current_payload_mbit"]
@@ -255,47 +328,39 @@ def transmit_backhaul(workload):
         len(payload)
     )
 
-    rcc_sock = connect_with_retry(
-        rcc_host,
-        rcc_port,
-    )
-
-    rcc_sock.settimeout(
-        BACKHAUL_ACK_TIMEOUT_S
-    )
-
-    local_ip, local_port = (
-        rcc_sock.getsockname()
-    )
-
-    remote_ip, remote_port = (
-        rcc_sock.getpeername()
-    )
-
     message["backhaul_tcp_source_port"] = (
-        local_port
+        channel["local_port"]
     )
 
     message[
         "backhaul_tcp_destination_port"
-    ] = remote_port
+    ] = channel["remote_port"]
 
     print(
         f"[SV] UAV {message['uav_id']} "
-        f"backhaul TCP ready: "
-        f"source_port={local_port}.",
+        f"assigned to pre-established "
+        f"backhaul channel {channel['channel_id']} "
+        f"(source_port={channel['local_port']}).",
         flush=True,
     )
 
-    backhaul_barrier.wait()
+    try:
+        backhaul_barrier.wait(
+            timeout=BACKHAUL_BARRIER_TIMEOUT_S
+        )
+    except threading.BrokenBarrierError as exc:
+        raise RuntimeError(
+            f"[SV] Backhaul synchronization failed "
+            f"for UAV {message['uav_id']}."
+        ) from exc
 
+    # This timestamp now marks only actual workload
+    # transmission. No socket/tc setup occurs after it.
     message["backhaul_send_start_epoch_s"] = (
         time.time()
     )
 
-    local_send_start = (
-        time.perf_counter()
-    )
+    local_send_start = time.perf_counter()
 
     send_frame(
         rcc_sock,
@@ -316,8 +381,7 @@ def transmit_backhaul(workload):
         f"[SV] UAV {message['uav_id']} "
         f"TCP send returned: "
         f"bytes={len(payload)}, "
-        f"local_send_call="
-        f"{local_send_call_s:.6f} s. "
+        f"local_send_call={local_send_call_s:.6f} s. "
         f"Waiting for RCC delivery ACK.",
         flush=True,
     )
@@ -415,11 +479,9 @@ def transmit_backhaul(workload):
     return workload
 
 
-print(
-    f"[SV] Starting SV node. "
-    f"Scenario={scenario}.",
-    flush=True,
-)
+# ---------------------------------------------------------
+# UAV ACCESS SIDE
+# ---------------------------------------------------------
 
 server = socket.socket(
     socket.AF_INET,
@@ -444,8 +506,10 @@ print(
     flush=True,
 )
 
+
 connections = []
 uav_ids = set()
+
 
 while len(connections) < num_uavs:
     conn, addr = server.accept()
@@ -494,6 +558,14 @@ while len(connections) < num_uavs:
     )
 
 
+# At this point:
+# - all backhaul TCP channels already exist
+# - tc backhaul configuration is active
+# - all UAVs have already configured their access tc
+# - all UAVs are READY
+#
+# Only now is the common experiment clock started.
+
 start_epoch_s = (
     time.time()
     + START_LEAD_TIME_S
@@ -505,11 +577,21 @@ start_message = {
     "start_epoch_s": start_epoch_s,
 }
 
+
+print(
+    f"[SV] Experimental infrastructure ready. "
+    f"Scheduling common START at "
+    f"{start_epoch_s:.6f}.",
+    flush=True,
+)
+
+
 for connection in connections:
     send_json_line(
         connection["socket"],
         start_message,
     )
+
 
 print(
     f"[SV] START sent to "
@@ -622,8 +704,9 @@ else:
 
 
 print(
-    f"[SV] Starting {num_uavs} independent "
-    f"TCP backhaul flows.",
+    f"[SV] Starting {num_uavs} synchronized "
+    f"backhaul transfers using "
+    f"pre-established TCP channels.",
     flush=True,
 )
 
@@ -636,6 +719,7 @@ with ThreadPoolExecutor(
         executor.map(
             transmit_backhaul,
             workloads,
+            backhaul_channels,
         )
     )
 
