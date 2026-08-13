@@ -1,0 +1,39 @@
+{
+  "experiment": {
+    "name": "ucc_maritime_offloading",
+    "scenarios": ["S1", "S2"],
+    "n_uavs": 3,
+    "repetitions": 1,
+    "results_dir": "res_ucc"
+  },
+
+  "workload": {
+    "input_size_mbit": 2.0,
+    "output_ratio": 0.10,
+    "compute_intensity_cycles_per_bit": 1000
+  },
+
+  "computing": {
+    "sv_capacity_gcycles_per_s": 2.0,
+    "rcc_capacity_gcycles_per_s": 500.0,
+    "sharing_model": "equal_static"
+  },
+
+  "communication": {
+    "uav_sv_rates_mbps": [80.0, 90.0, 100.0],
+    "sv_rcc_capacity_mbps": 5.0,
+    "sv_rcc_delay_ms": 100.0
+  },
+
+  "network": {
+    "sv_host": "sv_node",
+    "sv_port": 5000,
+    "rcc_host": "rcc_node",
+    "rcc_port": 6000
+  },
+
+  "runtime": {
+    "startup_timeout_s": 60,
+    "socket_timeout_s": 60
+  }
+}
