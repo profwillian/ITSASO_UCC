@@ -30,7 +30,10 @@ def connect_with_retry(host, port, timeout=60):
     deadline = time.time() + timeout
 
     while time.time() < deadline:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_STREAM,
+        )
 
         try:
             sock.connect((host, port))
@@ -40,8 +43,8 @@ def connect_with_retry(host, port, timeout=60):
             time.sleep(0.2)
 
     raise RuntimeError(
-        f"[SV] Could not connect to RCC at {host}:{port} "
-        f"within {timeout} seconds."
+        f"[SV] Could not connect to RCC at "
+        f"{host}:{port} within {timeout} seconds."
     )
 
 
@@ -65,7 +68,9 @@ def receive_workload(connection):
     metadata["sv_received_at"] = timestamp()
     metadata["sv_received_epoch_s"] = time.time()
 
-    metadata["access_payload_bytes_received"] = len(payload)
+    metadata["access_payload_bytes_received"] = len(
+        payload
+    )
 
     metadata["access_measured_s"] = (
         metadata["sv_received_epoch_s"]
@@ -108,8 +113,13 @@ rcc_port = config["nodes"]["rcc"]["port"]
 
 num_uavs = config["experiment"]["num_uavs"]
 
-input_size_mbit = config["workload"]["input_size_mbit"]
-mu = config["workload"]["output_input_ratio"]
+input_size_mbit = (
+    config["workload"]["input_size_mbit"]
+)
+
+mu = (
+    config["workload"]["output_input_ratio"]
+)
 
 c_inf = (
     config["workload"]
@@ -139,7 +149,9 @@ per_flow_backhaul_rate_mbps = (
     backhaul_capacity_mbps / num_uavs
 )
 
-input_size_bits = input_size_mbit * 1e6
+input_size_bits = (
+    input_size_mbit * 1e6
+)
 
 workload_cycles = (
     input_size_bits * c_inf
@@ -161,10 +173,12 @@ def process_at_sv(workload):
 
     start = time.perf_counter()
 
-    # Computation remains model-controlled.
+    # Computation is intentionally model-controlled.
     time.sleep(expected_compute_time_s)
 
-    measured = time.perf_counter() - start
+    measured = (
+        time.perf_counter() - start
+    )
 
     output_size_mbit = (
         message["input_size_mbit"] * mu
@@ -180,13 +194,17 @@ def process_at_sv(workload):
         expected_compute_time_s
     )
 
-    message["compute_measured_s"] = measured
+    message["compute_measured_s"] = (
+        measured
+    )
 
     message["current_payload_mbit"] = (
         output_size_mbit
     )
 
-    message["inference_finished_at"] = timestamp()
+    message["inference_finished_at"] = (
+        timestamp()
+    )
 
     return {
         "message": message,
@@ -204,8 +222,14 @@ print(
 # ---------------------------------------------------------
 # BACKHAUL INFRASTRUCTURE SETUP
 #
-# This phase is intentionally completed BEFORE workload
-# generation and therefore remains outside the E2E latency.
+# TCP connections and tc configuration are completed
+# before workload generation. Therefore, infrastructure
+# setup remains outside the measured E2E latency.
+#
+# IMPORTANT:
+# tc controls ONLY aggregate link capacity.
+# The fixed backhaul delay tau_bh is applied later as a
+# model-controlled delay outside TCP congestion dynamics.
 # ---------------------------------------------------------
 
 setup_start = time.perf_counter()
@@ -248,25 +272,40 @@ for channel_id in range(1, num_uavs + 1):
     )
 
     print(
-        f"[SV] Backhaul channel {channel_id}/{num_uavs} "
-        f"established: "
+        f"[SV] Backhaul channel "
+        f"{channel_id}/{num_uavs} established: "
         f"{local_ip}:{local_port} -> "
         f"{remote_ip}:{remote_port}.",
         flush=True,
     )
 
 
+# Rate-only emulation.
+#
+# Do NOT insert tau_bh as netem delay here because doing
+# so changes TCP dynamics and makes the fixed analytical
+# delay interact with congestion control.
 tc_result = configure_netem(
     peer_host=rcc_host,
     rate_mbps=backhaul_capacity_mbps,
-    delay_ms=backhaul_fixed_delay_ms,
+    delay_ms=0.0,
 )
 
 print(
     f"[SV] TC backhaul configured before START: "
     f"interface={tc_result['interface']}, "
-    f"aggregate_rate={tc_result['rate_mbps']:.3f} Mbit/s, "
-    f"delay={tc_result['delay_ms']:.3f} ms.",
+    f"aggregate_rate="
+    f"{tc_result['rate_mbps']:.3f} Mbit/s, "
+    f"netem_delay="
+    f"{tc_result['delay_ms']:.3f} ms.",
+    flush=True,
+)
+
+print(
+    f"[SV] Controlled backhaul fixed delay: "
+    f"tau_bh={backhaul_fixed_delay_ms:.3f} ms "
+    f"(applied during workload execution, "
+    f"outside TCP dynamics).",
     flush=True,
 )
 
@@ -282,7 +321,7 @@ print(
 )
 
 
-# Barrier now synchronizes ONLY transmission.
+# Barrier synchronizes the beginning of the backhaul phase.
 backhaul_barrier = threading.Barrier(
     num_uavs
 )
@@ -339,7 +378,8 @@ def transmit_backhaul(workload, channel):
     print(
         f"[SV] UAV {message['uav_id']} "
         f"assigned to pre-established "
-        f"backhaul channel {channel['channel_id']} "
+        f"backhaul channel "
+        f"{channel['channel_id']} "
         f"(source_port={channel['local_port']}).",
         flush=True,
     )
@@ -350,17 +390,71 @@ def transmit_backhaul(workload, channel):
         )
     except threading.BrokenBarrierError as exc:
         raise RuntimeError(
-            f"[SV] Backhaul synchronization failed "
-            f"for UAV {message['uav_id']}."
+            f"[SV] Backhaul synchronization "
+            f"failed for UAV "
+            f"{message['uav_id']}."
         ) from exc
 
-    # This timestamp now marks only actual workload
-    # transmission. No socket/tc setup occurs after it.
+    # -----------------------------------------------------
+    # Beginning of the measured backhaul phase.
+    #
+    # Keep this field name for compatibility with the RCC.
+    # It now marks the beginning of the full analytical
+    # backhaul phase:
+    #
+    #     tau_bh + TCP transmission
+    #
+    # Therefore RCC's backhaul_measured_s remains directly
+    # comparable with backhaul_expected_s.
+    # -----------------------------------------------------
+
     message["backhaul_send_start_epoch_s"] = (
         time.time()
     )
 
-    local_send_start = time.perf_counter()
+    message[
+        "backhaul_phase_start_epoch_s"
+    ] = message[
+        "backhaul_send_start_epoch_s"
+    ]
+
+    fixed_delay_start = (
+        time.perf_counter()
+    )
+
+    if backhaul_fixed_delay_s > 0:
+        time.sleep(
+            backhaul_fixed_delay_s
+        )
+
+    fixed_delay_measured_s = (
+        time.perf_counter()
+        - fixed_delay_start
+    )
+
+    message[
+        "backhaul_fixed_delay_measured_s"
+    ] = fixed_delay_measured_s
+
+    message[
+        "backhaul_transport_send_start_epoch_s"
+    ] = time.time()
+
+    print(
+        f"[SV] UAV {message['uav_id']} "
+        f"controlled backhaul delay completed: "
+        f"expected="
+        f"{backhaul_fixed_delay_s:.6f} s, "
+        f"measured="
+        f"{fixed_delay_measured_s:.6f} s.",
+        flush=True,
+    )
+
+    # Only the actual payload transfer is governed
+    # by TCP + tc rate shaping.
+    local_send_start = (
+        time.perf_counter()
+    )
 
     send_frame(
         rcc_sock,
@@ -373,22 +467,27 @@ def transmit_backhaul(workload, channel):
         - local_send_start
     )
 
-    message["backhaul_local_send_call_s"] = (
-        local_send_call_s
-    )
+    message[
+        "backhaul_local_send_call_s"
+    ] = local_send_call_s
 
     print(
         f"[SV] UAV {message['uav_id']} "
         f"TCP send returned: "
         f"bytes={len(payload)}, "
-        f"local_send_call={local_send_call_s:.6f} s. "
+        f"local_send_call="
+        f"{local_send_call_s:.6f} s. "
         f"Waiting for RCC delivery ACK.",
         flush=True,
     )
 
-    ack_stream = rcc_sock.makefile("rb")
+    ack_stream = (
+        rcc_sock.makefile("rb")
+    )
 
-    ack_wait_start = time.perf_counter()
+    ack_wait_start = (
+        time.perf_counter()
+    )
 
     try:
         ack = read_json_line(
@@ -398,7 +497,8 @@ def transmit_backhaul(workload, channel):
         raise RuntimeError(
             f"[SV] Backhaul delivery ACK timeout "
             f"for UAV {message['uav_id']} "
-            f"after {BACKHAUL_ACK_TIMEOUT_S:.1f} s."
+            f"after "
+            f"{BACKHAUL_ACK_TIMEOUT_S:.1f} s."
         ) from exc
 
     ack_wait_s = (
@@ -408,8 +508,9 @@ def transmit_backhaul(workload, channel):
 
     if ack is None:
         raise RuntimeError(
-            f"[SV] RCC closed connection without "
-            f"delivery ACK for UAV {message['uav_id']}."
+            f"[SV] RCC closed connection "
+            f"without delivery ACK for "
+            f"UAV {message['uav_id']}."
         )
 
     if ack.get("type") != "DELIVERY_ACK":
@@ -461,14 +562,15 @@ def transmit_backhaul(workload, channel):
         timestamp()
     )
 
-    message["rcc_confirmed_received_epoch_s"] = (
-        ack["rcc_received_epoch_s"]
-    )
+    message[
+        "rcc_confirmed_received_epoch_s"
+    ] = ack["rcc_received_epoch_s"]
 
     print(
         f"[SV] UAV {message['uav_id']} "
         f"delivery ACK received: "
-        f"bytes={ack['payload_bytes_received']}, "
+        f"bytes="
+        f"{ack['payload_bytes_received']}, "
         f"ack_wait={ack_wait_s:.6f} s.",
         flush=True,
     )
@@ -516,7 +618,9 @@ while len(connections) < num_uavs:
 
     stream = conn.makefile("rb")
 
-    ready = read_json_line(stream)
+    ready = read_json_line(
+        stream
+    )
 
     if ready is None:
         stream.close()
@@ -525,7 +629,8 @@ while len(connections) < num_uavs:
 
     if ready.get("type") != "READY":
         raise RuntimeError(
-            "[SV] Expected READY as first UAV message."
+            "[SV] Expected READY as "
+            "first UAV message."
         )
 
     if ready["scenario"] != scenario:
@@ -552,19 +657,16 @@ while len(connections) < num_uavs:
     )
 
     print(
-        f"[SV] READY received from UAV {uav_id}. "
-        f"Ready={len(connections)}/{num_uavs}.",
+        f"[SV] READY received from "
+        f"UAV {uav_id}. "
+        f"Ready="
+        f"{len(connections)}/{num_uavs}.",
         flush=True,
     )
 
 
-# At this point:
-# - all backhaul TCP channels already exist
-# - tc backhaul configuration is active
-# - all UAVs have already configured their access tc
-# - all UAVs are READY
-#
-# Only now is the common experiment clock started.
+# Infrastructure is already configured at this point.
+# The common experiment clock begins only now.
 
 start_epoch_s = (
     time.time()
@@ -648,8 +750,10 @@ for workload in workloads:
         f"[SV] UAV {message['uav_id']} "
         f"access observed: "
         f"bytes={len(payload)}, "
-        f"model={message['access_expected_s']:.6f} s, "
-        f"observed={message['access_measured_s']:.6f} s.",
+        f"model="
+        f"{message['access_expected_s']:.6f} s, "
+        f"observed="
+        f"{message['access_measured_s']:.6f} s.",
         flush=True,
     )
 
@@ -669,7 +773,9 @@ if scenario == "S1":
         flush=True,
     )
 
-    batch_start = time.perf_counter()
+    batch_start = (
+        time.perf_counter()
+    )
 
     with ThreadPoolExecutor(
         max_workers=num_uavs
@@ -689,8 +795,10 @@ if scenario == "S1":
 
     print(
         f"[SV] Batch inference completed. "
-        f"expected={expected_compute_time_s:.6f} s, "
-        f"measured={batch_measured_s:.6f} s.",
+        f"expected="
+        f"{expected_compute_time_s:.6f} s, "
+        f"measured="
+        f"{batch_measured_s:.6f} s.",
         flush=True,
     )
 
