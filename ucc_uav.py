@@ -29,10 +29,19 @@ def connect_with_retry(host, port, timeout=60):
 
 
 config_path = os.environ.get("CONFIG", "cnf/ucc_config.json")
+scenario = os.environ.get("SCENARIO", "S1")
 uav_id = int(os.environ["UAV_ID"])
 
 with open(config_path, "r") as f:
     config = json.load(f)
+
+valid_scenarios = config["experiment"]["scenarios"]
+
+if scenario not in valid_scenarios:
+    raise ValueError(
+        f"Scenario {scenario} is not valid. "
+        f"Available scenarios: {valid_scenarios}"
+    )
 
 num_uavs = config["experiment"]["num_uavs"]
 
@@ -53,20 +62,24 @@ if len(rates) != num_uavs:
 sv_host = config["nodes"]["sv"]["host"]
 sv_port = config["nodes"]["sv"]["port"]
 
-payload_size_mbit = config["workload"]["input_size_mbit"]
+input_size_mbit = config["workload"]["input_size_mbit"]
 
 message = {
     "type": "WORKLOAD",
+    "scenario": scenario,
     "uav_id": uav_id,
     "workload_id": f"uav{uav_id}-workload1",
-    "payload_size_mbit": payload_size_mbit,
+    "input_size_mbit": input_size_mbit,
+    "current_payload_mbit": input_size_mbit,
     "configured_access_rate_mbps": rates[uav_id - 1],
+    "execution_tier": None,
     "generated_at": timestamp(),
 }
 
 print(
-    f"[UAV {uav_id}] Generated workload "
-    f"{message['workload_id']}.",
+    f"[UAV {uav_id}] Scenario={scenario}. "
+    f"Generated {message['workload_id']} "
+    f"with {input_size_mbit:.3f} Mbit.",
     flush=True,
 )
 
@@ -85,6 +98,6 @@ sock.sendall(
 sock.close()
 
 print(
-    f"[UAV {uav_id}] Workload sent to SV. Finished.",
+    f"[UAV {uav_id}] Input workload sent to SV. Finished.",
     flush=True,
 )

@@ -9,6 +9,7 @@ services:
     privileged: true
     environment:
       - CONFIG=cnf/ucc_config.json
+      - SCENARIO=${UCC_SCENARIO:-S1}
     volumes:
       - ./:/home/
     networks:
@@ -23,6 +24,7 @@ services:
     privileged: true
     environment:
       - CONFIG=cnf/ucc_config.json
+      - SCENARIO=${UCC_SCENARIO:-S1}
     volumes:
       - ./:/home/
     networks:
@@ -41,6 +43,7 @@ services:
     environment:
       - CONFIG=cnf/ucc_config.json
       - UAV_ID=1
+      - SCENARIO=${UCC_SCENARIO:-S1}
     volumes:
       - ./:/home/
     networks:
@@ -58,6 +61,7 @@ services:
     environment:
       - CONFIG=cnf/ucc_config.json
       - UAV_ID=2
+      - SCENARIO=${UCC_SCENARIO:-S1}
     volumes:
       - ./:/home/
     networks:
@@ -75,6 +79,7 @@ services:
     environment:
       - CONFIG=cnf/ucc_config.json
       - UAV_ID=3
+      - SCENARIO=${UCC_SCENARIO:-S1}
     volumes:
       - ./:/home/
     networks:
