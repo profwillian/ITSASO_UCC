@@ -161,8 +161,26 @@ sv_capacity_cycles_s = (
     sv_capacity_gcycles_s * 1e9
 )
 
+if scenario == "S1":
+    sv_compute_jobs = num_uavs
+
+elif scenario == "S3":
+    if num_uavs % 2 != 0:
+        raise RuntimeError(
+            "S3 mixed 50/50 offloading requires "
+            "an even number of UAVs."
+        )
+
+    sv_compute_jobs = (
+        num_uavs // 2
+    )
+
+else:
+    sv_compute_jobs = 0
+
+
 expected_compute_time_s = (
-    num_uavs
+    sv_compute_jobs
     * workload_cycles
     / sv_capacity_cycles_s
 )
@@ -321,10 +339,18 @@ print(
 )
 
 
-# Barrier synchronizes the beginning of the backhaul phase.
-backhaul_barrier = threading.Barrier(
-    num_uavs
-)
+# S1 and S2 use synchronized backhaul transmission.
+#
+# S3 intentionally does not use the global barrier:
+# RCC-bound workloads may start backhaul transmission
+# immediately, while SV-bound workloads first complete
+# inference at the SV.
+if scenario == "S3":
+    backhaul_barrier = None
+else:
+    backhaul_barrier = threading.Barrier(
+        num_uavs
+    )
 
 
 def transmit_backhaul(workload, channel):
@@ -384,16 +410,65 @@ def transmit_backhaul(workload, channel):
         flush=True,
     )
 
-    try:
-        backhaul_barrier.wait(
-            timeout=BACKHAUL_BARRIER_TIMEOUT_S
+    # -----------------------------------------------------
+    # Instrument synchronization overhead separately.
+    #
+    # This interval is part of end-to-end latency but is
+    # intentionally outside backhaul_measured_s.
+    # -----------------------------------------------------
+
+    message["backhaul_barrier_wait_s"] = 0.0
+    message["backhaul_barrier_enter_epoch_s"] = None
+    message["backhaul_barrier_exit_epoch_s"] = None
+
+    if backhaul_barrier is not None:
+
+        message[
+            "backhaul_barrier_enter_epoch_s"
+        ] = time.time()
+
+        barrier_wait_start = time.perf_counter()
+
+        try:
+            backhaul_barrier.wait(
+                timeout=BACKHAUL_BARRIER_TIMEOUT_S
+            )
+        except threading.BrokenBarrierError as exc:
+
+            message[
+                "backhaul_barrier_wait_s"
+            ] = (
+                time.perf_counter()
+                - barrier_wait_start
+            )
+
+            message[
+                "backhaul_barrier_exit_epoch_s"
+            ] = time.time()
+
+            raise RuntimeError(
+                f"[SV] Backhaul synchronization "
+                f"failed for UAV "
+                f"{message['uav_id']}."
+            ) from exc
+
+        message[
+            "backhaul_barrier_wait_s"
+        ] = (
+            time.perf_counter()
+            - barrier_wait_start
         )
-    except threading.BrokenBarrierError as exc:
-        raise RuntimeError(
-            f"[SV] Backhaul synchronization "
-            f"failed for UAV "
-            f"{message['uav_id']}."
-        ) from exc
+
+        message[
+            "backhaul_barrier_exit_epoch_s"
+        ] = time.time()
+
+        print(
+            f"[SV] UAV {message['uav_id']} "
+            f"backhaul barrier wait="
+            f"{message['backhaul_barrier_wait_s']:.6f} s.",
+            flush=True,
+        )
 
     # -----------------------------------------------------
     # Beginning of the measured backhaul phase.
@@ -410,6 +485,11 @@ def transmit_backhaul(workload, channel):
 
     message["backhaul_send_start_epoch_s"] = (
         time.time()
+    )
+
+    message["sv_post_access_wait_s"] = (
+        message["backhaul_send_start_epoch_s"]
+        - message["sv_received_epoch_s"]
     )
 
     message[
@@ -765,7 +845,16 @@ print(
 )
 
 
+
+backhaul_already_sent = False
+
+
 if scenario == "S1":
+
+    for workload in workloads:
+        workload["message"][
+            "offload_target"
+        ] = "SV"
 
     print(
         f"[SV] Starting {num_uavs} concurrent "
@@ -802,7 +891,21 @@ if scenario == "S1":
         flush=True,
     )
 
-else:
+
+elif scenario == "S2":
+
+    for workload in workloads:
+        message = workload["message"]
+
+        message[
+            "offload_target"
+        ] = "RCC"
+
+        message[
+            "current_payload_mbit"
+        ] = message[
+            "input_size_mbit"
+        ]
 
     print(
         "[SV] S2 selected: preserving "
@@ -811,25 +914,143 @@ else:
     )
 
 
-print(
-    f"[SV] Starting {num_uavs} synchronized "
-    f"backhaul transfers using "
-    f"pre-established TCP channels.",
-    flush=True,
-)
+elif scenario == "S3":
 
-
-with ThreadPoolExecutor(
-    max_workers=num_uavs
-) as executor:
-
-    transmitted_workloads = list(
-        executor.map(
-            transmit_backhaul,
-            workloads,
-            backhaul_channels,
+    if num_uavs % 2 != 0:
+        raise RuntimeError(
+            "[SV] S3 mixed 50/50 offloading "
+            "requires an even number of UAVs."
         )
+
+    sv_jobs = []
+    rcc_jobs = []
+
+    for workload in workloads:
+        message = workload["message"]
+
+        # Deterministic 50/50 assignment.
+        #
+        # Odd UAV IDs -> SV
+        # Even UAV IDs -> RCC
+        if message["uav_id"] % 2 == 1:
+            message[
+                "offload_target"
+            ] = "SV"
+
+            sv_jobs.append(
+                message["uav_id"]
+            )
+
+        else:
+            message[
+                "offload_target"
+            ] = "RCC"
+
+            message[
+                "current_payload_mbit"
+            ] = message[
+                "input_size_mbit"
+            ]
+
+            rcc_jobs.append(
+                message["uav_id"]
+            )
+
+    if (
+        len(sv_jobs)
+        != num_uavs // 2
+        or len(rcc_jobs)
+        != num_uavs // 2
+    ):
+        raise RuntimeError(
+            "[SV] S3 did not produce an exact "
+            "50/50 SV/RCC workload split."
+        )
+
+    print(
+        f"[SV] S3 mixed offloading selected. "
+        f"SV jobs={sv_jobs}; "
+        f"RCC jobs={rcc_jobs}.",
+        flush=True,
     )
+
+    print(
+        f"[SV] SV compute share: "
+        f"{len(sv_jobs)} jobs. "
+        f"Expected per-job compute="
+        f"{expected_compute_time_s:.6f} s.",
+        flush=True,
+    )
+
+    def execute_mixed_path(
+        workload,
+        channel,
+    ):
+        message = workload["message"]
+
+        if (
+            message["offload_target"]
+            == "SV"
+        ):
+            workload = process_at_sv(
+                workload
+            )
+
+        return transmit_backhaul(
+            workload,
+            channel,
+        )
+
+    print(
+        "[SV] Starting mixed SV/RCC paths. "
+        "RCC-bound jobs can enter the "
+        "backhaul immediately; SV-bound jobs "
+        "first complete inference.",
+        flush=True,
+    )
+
+    with ThreadPoolExecutor(
+        max_workers=num_uavs
+    ) as executor:
+
+        workloads = list(
+            executor.map(
+                execute_mixed_path,
+                workloads,
+                backhaul_channels,
+            )
+        )
+
+    backhaul_already_sent = True
+
+
+else:
+    raise RuntimeError(
+        f"[SV] Unsupported scenario: "
+        f"{scenario}"
+    )
+
+
+if not backhaul_already_sent:
+
+    print(
+        f"[SV] Starting {num_uavs} synchronized "
+        f"backhaul transfers using "
+        f"pre-established TCP channels.",
+        flush=True,
+    )
+
+    with ThreadPoolExecutor(
+        max_workers=num_uavs
+    ) as executor:
+
+        workloads = list(
+            executor.map(
+                transmit_backhaul,
+                workloads,
+                backhaul_channels,
+            )
+        )
 
 
 total_backhaul_bytes = sum(

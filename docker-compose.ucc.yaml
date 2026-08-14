@@ -87,6 +87,25 @@ services:
     depends_on:
       - sv_node
 
+
+  uav_node_4:
+    build:
+      context: .
+      dockerfile: DockerfileUAV
+    image: ucc_uav_node
+    container_name: uav_node_4
+    privileged: true
+    environment:
+      - CONFIG=cnf/ucc_config.json
+      - UAV_ID=4
+      - SCENARIO=${UCC_SCENARIO:-S1}
+    volumes:
+      - ./:/home/
+    networks:
+      - ucc_access_net
+    depends_on:
+      - sv_node
+
 networks:
 
   ucc_access_net:

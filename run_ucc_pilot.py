@@ -350,7 +350,7 @@ def main():
     summary_rows = []
     per_uav_rows = []
 
-    scenarios = ["S1", "S2"]
+    scenarios = ["S1", "S2", "S3"]
 
     print(
         f"[PILOT] Campaign directory: "

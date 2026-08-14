@@ -1,32 +1,33 @@
 {
   "experiment": {
     "name": "ucc_maritime_baseline",
-    "num_uavs": 3,
-    "scenarios": ["S1", "S2"],
+    "num_uavs": 4,
+    "scenarios": [
+      "S1",
+      "S2",
+      "S3"
+    ],
     "results_dir": "res_ucc"
   },
-
   "workload": {
     "input_size_mbit": 2.0,
-    "output_input_ratio": 0.10,
+    "output_input_ratio": 0.1,
     "computational_intensity_cycles_per_bit": 1000
   },
-
   "computation": {
     "sv_capacity_gcycles_per_s": 2.0,
     "rcc_capacity_gcycles_per_s": 500.0
   },
-
   "communication": {
     "uav_sv_rates_mbps": [
       80.0,
       90.0,
-      100.0
+      100.0,
+      90.0
     ],
     "sv_rcc_backhaul_capacity_mbps": 5.0,
     "sv_rcc_fixed_delay_ms": 100.0
   },
-
   "nodes": {
     "sv": {
       "host": "sv_node",
@@ -37,7 +38,6 @@
       "port": 8081
     }
   },
-
   "docker": {
     "access_network": "ucc_access_net",
     "backhaul_network": "ucc_backhaul_net"
