@@ -9,4 +9,4 @@ alg/__pycache__/*
 plots/__pycache__/*
 results_*
 models/*
-nohup.out
+nohup.out.venv/
