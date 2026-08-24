@@ -9,6 +9,12 @@
     ],
     "results_dir": "res_ucc"
   },
+  "mixed_offloading": {
+    "sv_uav_ids": [
+      1,
+      3
+    ]
+  },
   "workload": {
     "input_size_mbit": 2.0,
     "output_input_ratio": 0.1,

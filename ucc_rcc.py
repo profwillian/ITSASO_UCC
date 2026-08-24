@@ -883,21 +883,91 @@ rcc_capacity_cycles_s = (
     rcc_capacity_gcycles_s * 1e9
 )
 
+def resolve_mixed_sv_uav_ids():
+    configured_ids = (
+        config.get(
+            "mixed_offloading",
+            {},
+        ).get(
+            "sv_uav_ids"
+        )
+    )
+
+    # Backward-compatible default:
+    # odd UAV IDs are executed at the SV.
+    if configured_ids is None:
+        configured_ids = [
+            uav_id
+            for uav_id in range(
+                1,
+                num_uavs + 1,
+            )
+            if uav_id % 2 == 1
+        ]
+
+    try:
+        sv_ids = sorted(
+            int(uav_id)
+            for uav_id in configured_ids
+        )
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "mixed_offloading.sv_uav_ids "
+            "must contain integer UAV IDs."
+        )
+
+    if len(sv_ids) != len(set(sv_ids)):
+        raise RuntimeError(
+            "mixed_offloading.sv_uav_ids "
+            "contains duplicate UAV IDs."
+        )
+
+    valid_ids = set(
+        range(
+            1,
+            num_uavs + 1,
+        )
+    )
+
+    invalid_ids = (
+        set(sv_ids) - valid_ids
+    )
+
+    if invalid_ids:
+        raise RuntimeError(
+            "Invalid UAV IDs in "
+            "mixed_offloading.sv_uav_ids: "
+            f"{sorted(invalid_ids)}"
+        )
+
+    if not (
+        0 < len(sv_ids) < num_uavs
+    ):
+        raise RuntimeError(
+            "S3 requires at least one workload "
+            "at the SV and at least one workload "
+            "at the RCC."
+        )
+
+    return sv_ids
+
+
 if scenario == "S2":
+    mixed_sv_uav_ids = []
     rcc_compute_jobs = num_uavs
 
 elif scenario == "S3":
-    if num_uavs % 2 != 0:
-        raise RuntimeError(
-            "S3 mixed 50/50 offloading requires "
-            "an even number of UAVs."
-        )
+    mixed_sv_uav_ids = (
+        resolve_mixed_sv_uav_ids()
+    )
 
     rcc_compute_jobs = (
-        num_uavs // 2
+        num_uavs
+        - len(mixed_sv_uav_ids)
     )
 
 else:
+    mixed_sv_uav_ids = []
     rcc_compute_jobs = 0
 
 
@@ -1171,18 +1241,34 @@ elif scenario == "S3":
                 f"{target}."
             )
 
+    expected_sv_count = len(
+        mixed_sv_uav_ids
+    )
+
+    expected_rcc_count = (
+        num_uavs
+        - expected_sv_count
+    )
+
     if (
-        sv_count != num_uavs // 2
-        or rcc_count != num_uavs // 2
+        sv_count != expected_sv_count
+        or rcc_count != expected_rcc_count
     ):
         raise RuntimeError(
-            "[RCC] S3 result does not contain "
-            "an exact 50/50 SV/RCC split."
+            "[RCC] S3 result does not match "
+            "the configured SV/RCC split."
         )
+
+    rho_sv = (
+        sv_count
+        / num_uavs
+    )
 
     print(
         f"[RCC] S3 mixed inference complete: "
-        f"SV={sv_count}, RCC={rcc_count}.",
+        f"SV={sv_count}, "
+        f"RCC={rcc_count}, "
+        f"rho_sv={rho_sv:.2f}.",
         flush=True,
     )
 

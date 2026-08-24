@@ -326,6 +326,25 @@ def main():
         ),
     )
 
+    parser.add_argument(
+        "--scenarios",
+        nargs="+",
+        choices=[
+            "S1",
+            "S2",
+            "S3",
+        ],
+        default=[
+            "S1",
+            "S2",
+            "S3",
+        ],
+        help=(
+            "Scenarios to execute. "
+            "Default: S1 S2 S3."
+        ),
+    )
+
     args = parser.parse_args()
 
     if args.runs < 1:
@@ -350,7 +369,7 @@ def main():
     summary_rows = []
     per_uav_rows = []
 
-    scenarios = ["S1", "S2", "S3"]
+    scenarios = args.scenarios
 
     print(
         f"[PILOT] Campaign directory: "

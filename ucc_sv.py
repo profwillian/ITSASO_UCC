@@ -161,21 +161,90 @@ sv_capacity_cycles_s = (
     sv_capacity_gcycles_s * 1e9
 )
 
+def resolve_mixed_sv_uav_ids():
+    configured_ids = (
+        config.get(
+            "mixed_offloading",
+            {},
+        ).get(
+            "sv_uav_ids"
+        )
+    )
+
+    # Backward-compatible default:
+    # odd UAV IDs are executed at the SV.
+    if configured_ids is None:
+        configured_ids = [
+            uav_id
+            for uav_id in range(
+                1,
+                num_uavs + 1,
+            )
+            if uav_id % 2 == 1
+        ]
+
+    try:
+        sv_ids = sorted(
+            int(uav_id)
+            for uav_id in configured_ids
+        )
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            "mixed_offloading.sv_uav_ids "
+            "must contain integer UAV IDs."
+        )
+
+    if len(sv_ids) != len(set(sv_ids)):
+        raise RuntimeError(
+            "mixed_offloading.sv_uav_ids "
+            "contains duplicate UAV IDs."
+        )
+
+    valid_ids = set(
+        range(
+            1,
+            num_uavs + 1,
+        )
+    )
+
+    invalid_ids = (
+        set(sv_ids) - valid_ids
+    )
+
+    if invalid_ids:
+        raise RuntimeError(
+            "Invalid UAV IDs in "
+            "mixed_offloading.sv_uav_ids: "
+            f"{sorted(invalid_ids)}"
+        )
+
+    if not (
+        0 < len(sv_ids) < num_uavs
+    ):
+        raise RuntimeError(
+            "S3 requires at least one workload "
+            "at the SV and at least one workload "
+            "at the RCC."
+        )
+
+    return sv_ids
+
+
 if scenario == "S1":
+    mixed_sv_uav_ids = []
     sv_compute_jobs = num_uavs
 
 elif scenario == "S3":
-    if num_uavs % 2 != 0:
-        raise RuntimeError(
-            "S3 mixed 50/50 offloading requires "
-            "an even number of UAVs."
-        )
+    mixed_sv_uav_ids = (
+        resolve_mixed_sv_uav_ids()
+    )
 
-    sv_compute_jobs = (
-        num_uavs // 2
+    sv_compute_jobs = len(
+        mixed_sv_uav_ids
     )
 
 else:
+    mixed_sv_uav_ids = []
     sv_compute_jobs = 0
 
 
@@ -916,23 +985,17 @@ elif scenario == "S2":
 
 elif scenario == "S3":
 
-    if num_uavs % 2 != 0:
-        raise RuntimeError(
-            "[SV] S3 mixed 50/50 offloading "
-            "requires an even number of UAVs."
-        )
-
     sv_jobs = []
     rcc_jobs = []
+
+    sv_id_set = set(
+        mixed_sv_uav_ids
+    )
 
     for workload in workloads:
         message = workload["message"]
 
-        # Deterministic 50/50 assignment.
-        #
-        # Odd UAV IDs -> SV
-        # Even UAV IDs -> RCC
-        if message["uav_id"] % 2 == 1:
+        if message["uav_id"] in sv_id_set:
             message[
                 "offload_target"
             ] = "SV"
@@ -956,21 +1019,37 @@ elif scenario == "S3":
                 message["uav_id"]
             )
 
+    expected_sv_jobs = len(
+        mixed_sv_uav_ids
+    )
+
+    expected_rcc_jobs = (
+        num_uavs
+        - expected_sv_jobs
+    )
+
     if (
         len(sv_jobs)
-        != num_uavs // 2
+        != expected_sv_jobs
         or len(rcc_jobs)
-        != num_uavs // 2
+        != expected_rcc_jobs
     ):
         raise RuntimeError(
-            "[SV] S3 did not produce an exact "
-            "50/50 SV/RCC workload split."
+            "[SV] S3 workload assignment "
+            "does not match the configured "
+            "SV/RCC split."
         )
+
+    rho_sv = (
+        len(sv_jobs)
+        / num_uavs
+    )
 
     print(
         f"[SV] S3 mixed offloading selected. "
         f"SV jobs={sv_jobs}; "
-        f"RCC jobs={rcc_jobs}.",
+        f"RCC jobs={rcc_jobs}; "
+        f"rho_sv={rho_sv:.2f}.",
         flush=True,
     )
 
