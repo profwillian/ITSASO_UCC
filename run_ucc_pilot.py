@@ -10,7 +10,10 @@ from datetime import datetime
 from pathlib import Path
 
 
-COMPOSE_FILE = "docker-compose.ucc.yaml"
+COMPOSE_FILE = os.environ.get(
+    "UCC_COMPOSE_FILE",
+    "docker-compose.ucc.yaml",
+)
 BASE_RESULTS_DIR = Path("res_ucc")
 
 
