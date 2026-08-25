@@ -542,6 +542,18 @@ def main():
     )
 
     parser.add_argument(
+        "--m-sv",
+        nargs="+",
+        type=int,
+        default=None,
+        help=(
+            "Optional subset of numbers of workloads "
+            "executed at the SV. If omitted, all values "
+            "from 0 to N are evaluated."
+        ),
+    )
+
+    parser.add_argument(
         "--runs",
         type=int,
         default=1,
@@ -606,6 +618,45 @@ def main():
                 "Cbh values must be positive."
             )
 
+    m_sv_by_n = {}
+
+    for num_uavs in n_values:
+
+        if args.m_sv is None:
+            values = list(
+                range(
+                    0,
+                    num_uavs + 1,
+                )
+            )
+        else:
+            values = sorted(
+                set(
+                    args.m_sv
+                )
+            )
+
+            invalid = [
+                value
+                for value in values
+                if not (
+                    0
+                    <= value
+                    <= num_uavs
+                )
+            ]
+
+            if invalid:
+                raise ValueError(
+                    f"Invalid --m-sv values "
+                    f"for N={num_uavs}: "
+                    f"{invalid}"
+                )
+
+        m_sv_by_n[
+            num_uavs
+        ] = values
+
     original_config_text = (
         CONFIG_PATH.read_text(
             encoding="utf-8"
@@ -635,8 +686,10 @@ def main():
     rows = []
 
     total_configurations = sum(
-        (
-            num_uavs + 1
+        len(
+            m_sv_by_n[
+                num_uavs
+            ]
         )
         * len(
             cbh_values
@@ -726,10 +779,9 @@ def main():
                     "sv_rcc_backhaul_capacity_mbps"
                 ] = cbh_mbps
 
-                for m_sv in range(
-                    0,
-                    num_uavs + 1,
-                ):
+                for m_sv in m_sv_by_n[
+                    num_uavs
+                ]:
 
                     configuration_index += 1
 
