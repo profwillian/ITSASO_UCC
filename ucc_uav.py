@@ -75,7 +75,42 @@ if len(rates) != num_uavs:
 sv_host = config["nodes"]["sv"]["host"]
 sv_port = config["nodes"]["sv"]["port"]
 
-input_size_mbit = config["workload"]["input_size_mbit"]
+workload_config = config["workload"]
+
+configured_input_sizes_mbit = (
+    workload_config.get(
+        "input_sizes_mbit"
+    )
+)
+
+if configured_input_sizes_mbit is None:
+    input_size_mbit = float(
+        workload_config[
+            "input_size_mbit"
+        ]
+    )
+else:
+    if (
+        len(configured_input_sizes_mbit)
+        != num_uavs
+    ):
+        raise ValueError(
+            "workload.input_sizes_mbit must "
+            "contain exactly one value per UAV."
+        )
+
+    input_size_mbit = float(
+        configured_input_sizes_mbit[
+            uav_id - 1
+        ]
+    )
+
+if input_size_mbit <= 0:
+    raise ValueError(
+        f"Invalid workload size for UAV "
+        f"{uav_id}: {input_size_mbit} Mbit."
+    )
+
 access_rate_mbps = rates[uav_id - 1]
 
 payload_size_bytes = mbit_to_bytes(input_size_mbit)

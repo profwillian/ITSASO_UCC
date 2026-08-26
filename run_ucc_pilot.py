@@ -28,6 +28,51 @@ def run_command(command, env=None, timeout=None):
     )
 
 
+
+
+def parse_compose_ps_json(output):
+    """
+    Parse `docker compose ps --format json`.
+
+    Compose versions may return either a JSON array or
+    one JSON object per line, so support both formats.
+    """
+
+    output = output.strip()
+
+    if not output:
+        return []
+
+    try:
+        parsed = json.loads(output)
+
+        if isinstance(parsed, list):
+            return parsed
+
+        if isinstance(parsed, dict):
+            return [parsed]
+
+    except json.JSONDecodeError:
+        pass
+
+    rows = []
+
+    for line in output.splitlines():
+        line = line.strip()
+
+        if not line:
+            continue
+
+        parsed = json.loads(line)
+
+        if isinstance(parsed, list):
+            rows.extend(parsed)
+        else:
+            rows.append(parsed)
+
+    return rows
+
+
 def compose_down():
     run_command(
         [
@@ -47,6 +92,25 @@ def run_scenario(scenario, timeout):
 
     compose_down()
 
+    # -----------------------------------------------------
+    # Remove stale top-level outputs before every run.
+    #
+    # This guarantees that copy_run_results() can only
+    # consume files produced by the current execution.
+    # -----------------------------------------------------
+
+    expected_outputs = [
+        BASE_RESULTS_DIR
+        / f"{scenario}_summary.json",
+        BASE_RESULTS_DIR
+        / f"{scenario}_results.csv",
+    ]
+
+    for output_path in expected_outputs:
+        output_path.unlink(
+            missing_ok=True
+        )
+
     result = run_command(
         [
             "docker",
@@ -59,6 +123,178 @@ def run_scenario(scenario, timeout):
         env=env,
         timeout=timeout,
     )
+
+    # Preserve an explicit Docker Compose failure.
+    if result.returncode != 0:
+        return result
+
+    # -----------------------------------------------------
+    # docker compose up can return successfully even when
+    # an individual service has exited unsuccessfully.
+    #
+    # Query every container explicitly before compose_down()
+    # removes the execution state.
+    # -----------------------------------------------------
+
+    ps_result = run_command(
+        [
+            "docker",
+            "compose",
+            "-f",
+            COMPOSE_FILE,
+            "ps",
+            "-a",
+            "--format",
+            "json",
+        ],
+        env=env,
+        timeout=30,
+    )
+
+    validation_errors = []
+
+    if ps_result.returncode != 0:
+        validation_errors.append(
+            "docker compose ps failed with "
+            f"return code {ps_result.returncode}."
+        )
+
+    else:
+        try:
+            containers = (
+                parse_compose_ps_json(
+                    ps_result.stdout
+                )
+            )
+
+        except Exception as exc:
+            containers = []
+
+            validation_errors.append(
+                "Could not parse docker compose ps "
+                f"output: {exc}"
+            )
+
+        if not containers:
+            validation_errors.append(
+                "docker compose ps returned "
+                "no containers."
+            )
+
+        for container in containers:
+
+            service = (
+                container.get("Service")
+                or container.get("Name")
+                or container.get("Names")
+                or "<unknown>"
+            )
+
+            state = str(
+                container.get(
+                    "State",
+                    ""
+                )
+            ).lower()
+
+            exit_code = container.get(
+                "ExitCode"
+            )
+
+            try:
+                exit_code = int(
+                    exit_code
+                )
+
+            except (
+                TypeError,
+                ValueError,
+            ):
+                validation_errors.append(
+                    f"Service {service} has "
+                    f"invalid ExitCode={exit_code!r}."
+                )
+
+                continue
+
+            if state != "exited":
+                validation_errors.append(
+                    f"Service {service} ended "
+                    f"validation in state "
+                    f"{state!r}."
+                )
+
+            if exit_code != 0:
+                validation_errors.append(
+                    f"Service {service} exited "
+                    f"with code {exit_code}."
+                )
+
+    # -----------------------------------------------------
+    # Application-level completion markers complement the
+    # container exit-code check.
+    # -----------------------------------------------------
+
+    required_markers = [
+        "[SV] Completed successfully.",
+        "[RCC] Completed successfully.",
+    ]
+
+    for marker in required_markers:
+
+        if marker not in result.stdout:
+            validation_errors.append(
+                "Missing success marker: "
+                f"{marker}"
+            )
+
+    # -----------------------------------------------------
+    # Confirm that the current execution produced both
+    # required result artifacts.
+    # -----------------------------------------------------
+
+    for output_path in expected_outputs:
+
+        if not output_path.exists():
+            validation_errors.append(
+                "Current run did not produce "
+                f"{output_path}."
+            )
+
+    if validation_errors:
+
+        diagnostics = [
+            "",
+            "[PILOT][VALIDATION] "
+            "Run rejected:",
+        ]
+
+        diagnostics.extend(
+            f"[PILOT][VALIDATION] - {error}"
+            for error in validation_errors
+        )
+
+        diagnostics.extend(
+            [
+                "",
+                "[PILOT][VALIDATION] "
+                "docker compose ps:",
+                ps_result.stdout.strip(),
+                "",
+            ]
+        )
+
+        combined_stdout = (
+            result.stdout
+            + "\n".join(diagnostics)
+        )
+
+        return subprocess.CompletedProcess(
+            args=result.args,
+            returncode=1,
+            stdout=combined_stdout,
+            stderr=None,
+        )
 
     return result
 
@@ -164,6 +400,12 @@ def read_per_uav_results(
                     "run": run_number,
                     "uav_id":
                         int(row["uav_id"]),
+                    "input_size_mbit":
+                        float(
+                            row[
+                                "input_size_mbit"
+                            ]
+                        ),
                     "access_model_s":
                         float(
                             row[

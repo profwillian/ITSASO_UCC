@@ -64,14 +64,6 @@ def model_s3_work_conserving_backhaul(
         / 1000.0
     )
 
-    input_size_mbit = float(
-        config[
-            "workload"
-        ][
-            "input_size_mbit"
-        ]
-    )
-
     mu = float(
         config[
             "workload"
@@ -137,8 +129,10 @@ def model_s3_work_conserving_backhaul(
                 access_barrier_s
             )
 
-            payload_mbit = (
-                input_size_mbit
+            payload_mbit = float(
+                message[
+                    "input_size_mbit"
+                ]
             )
 
             post_compute_s = float(
@@ -160,7 +154,11 @@ def model_s3_work_conserving_backhaul(
             )
 
             payload_mbit = (
-                input_size_mbit
+                float(
+                    message[
+                        "input_size_mbit"
+                    ]
+                )
                 * mu
             )
 
@@ -511,6 +509,12 @@ def save_results(
                     message["uav_id"],
                 "execution_tier":
                     message["execution_tier"],
+                "input_size_mbit":
+                    float(
+                        message[
+                            "input_size_mbit"
+                        ]
+                    ),
                 "access_rate_mbps":
                     message[
                         "configured_access_rate_mbps"
@@ -852,10 +856,6 @@ num_uavs = (
     config["experiment"]["num_uavs"]
 )
 
-input_size_mbit = (
-    config["workload"]["input_size_mbit"]
-)
-
 mu = (
     config["workload"]["output_input_ratio"]
 )
@@ -870,14 +870,6 @@ rcc_capacity_gcycles_s = (
     ["rcc_capacity_gcycles_per_s"]
 )
 
-
-input_size_bits = (
-    input_size_mbit * 1e6
-)
-
-workload_cycles = (
-    input_size_bits * c_inf
-)
 
 rcc_capacity_cycles_s = (
     rcc_capacity_gcycles_s * 1e9
@@ -971,14 +963,30 @@ else:
     rcc_compute_jobs = 0
 
 
-expected_compute_time_s = (
-    rcc_compute_jobs
-    * workload_cycles
-    / rcc_capacity_cycles_s
-)
+def expected_rcc_compute_time_s(
+    input_size_mbit,
+):
+    workload_cycles = (
+        float(input_size_mbit)
+        * 1e6
+        * c_inf
+    )
+
+    return (
+        rcc_compute_jobs
+        * workload_cycles
+        / rcc_capacity_cycles_s
+    )
 
 
 def process_at_rcc(message):
+
+    compute_expected_s = (
+        expected_rcc_compute_time_s(
+            message["input_size_mbit"]
+        )
+    )
+
     message["inference_started_at"] = (
         timestamp()
     )
@@ -996,7 +1004,7 @@ def process_at_rcc(message):
 
     # Computation remains model-controlled.
     time.sleep(
-        expected_compute_time_s
+        compute_expected_s
     )
 
     measured = (
@@ -1012,7 +1020,7 @@ def process_at_rcc(message):
     message["execution_tier"] = "RCC"
 
     message["compute_expected_s"] = (
-        expected_compute_time_s
+        compute_expected_s
     )
 
     message["compute_measured_s"] = (

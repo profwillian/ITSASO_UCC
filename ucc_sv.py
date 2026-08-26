@@ -14,12 +14,322 @@ from ucc_protocol import (
     send_json_line,
 )
 
-from ucc_tc import configure_netem
 
 
 START_LEAD_TIME_S = 0.5
 BACKHAUL_ACK_TIMEOUT_S = 120.0
 BACKHAUL_BARRIER_TIMEOUT_S = 5.0
+
+
+class WorkConservingBackhaulScheduler:
+    """
+    Real-time implementation of a work-conserving
+    processor-sharing backhaul.
+
+    If q(t) flows are active, every active flow receives
+
+        C_bh / q(t)
+
+    of virtual service capacity.
+
+    The scheduler controls service time only. Actual TCP
+    delivery occurs after the corresponding virtual service
+    completes and is intentionally left unshaped.
+    """
+
+    def __init__(
+        self,
+        capacity_mbps,
+    ):
+        self.capacity_mbps = float(
+            capacity_mbps
+        )
+
+        if self.capacity_mbps <= 0:
+            raise ValueError(
+                "Backhaul capacity must be positive."
+            )
+
+        self.condition = threading.Condition()
+
+        self.active = {}
+
+        self.last_update_s = (
+            time.perf_counter()
+        )
+
+        self.closed = False
+
+        self.worker = threading.Thread(
+            target=self._run,
+            name="ucc-backhaul-scheduler",
+            daemon=True,
+        )
+
+        self.worker.start()
+
+
+    def _advance_locked(
+        self,
+        target_s,
+    ):
+        """
+        Advance the fluid server exactly from the previous
+        virtual time to target_s.
+
+        More than one flow may finish during the interval,
+        so the active set and per-flow rate are recomputed
+        after every completion event.
+        """
+
+        eps = 1e-12
+
+        if not self.active:
+            self.last_update_s = target_s
+            return
+
+        while (
+            self.active
+            and self.last_update_s
+            < target_s - eps
+        ):
+            active_count = len(
+                self.active
+            )
+
+            per_flow_rate_mbps = (
+                self.capacity_mbps
+                / active_count
+            )
+
+            available_s = (
+                target_s
+                - self.last_update_s
+            )
+
+            time_to_first_finish_s = min(
+                state["remaining_mbit"]
+                / per_flow_rate_mbps
+                for state
+                in self.active.values()
+            )
+
+            if (
+                time_to_first_finish_s
+                <= available_s + eps
+            ):
+                elapsed_s = max(
+                    0.0,
+                    time_to_first_finish_s,
+                )
+            else:
+                elapsed_s = (
+                    available_s
+                )
+
+            transmitted_mbit = (
+                per_flow_rate_mbps
+                * elapsed_s
+            )
+
+            for state in self.active.values():
+                state["remaining_mbit"] -= (
+                    transmitted_mbit
+                )
+
+            self.last_update_s += (
+                elapsed_s
+            )
+
+            if (
+                time_to_first_finish_s
+                > available_s + eps
+            ):
+                break
+
+            completed_ids = [
+                flow_id
+                for flow_id, state
+                in self.active.items()
+                if (
+                    state["remaining_mbit"]
+                    <= 1e-9
+                )
+            ]
+
+            if not completed_ids:
+                raise RuntimeError(
+                    "Backhaul scheduler reached a "
+                    "completion event without a "
+                    "completed flow."
+                )
+
+            for flow_id in completed_ids:
+                state = self.active.pop(
+                    flow_id
+                )
+
+                state[
+                    "virtual_completion_s"
+                ] = self.last_update_s
+
+                state["done"].set()
+
+        if not self.active:
+            self.last_update_s = (
+                target_s
+            )
+
+
+    def serve(
+        self,
+        flow_id,
+        payload_mbit,
+        timeout_s,
+    ):
+        payload_mbit = float(
+            payload_mbit
+        )
+
+        if payload_mbit <= 0:
+            raise ValueError(
+                "Backhaul payload must be positive."
+            )
+
+        done = threading.Event()
+
+        with self.condition:
+            now_s = time.perf_counter()
+
+            self._advance_locked(
+                now_s
+            )
+
+            if flow_id in self.active:
+                raise RuntimeError(
+                    f"Backhaul flow {flow_id} "
+                    f"is already active."
+                )
+
+            state = {
+                "flow_id": flow_id,
+                "remaining_mbit":
+                    payload_mbit,
+                "release_s":
+                    now_s,
+                "virtual_completion_s":
+                    None,
+                "done":
+                    done,
+            }
+
+            self.active[
+                flow_id
+            ] = state
+
+            self.condition.notify_all()
+
+        wait_start_s = (
+            time.perf_counter()
+        )
+
+        completed = done.wait(
+            timeout=timeout_s
+        )
+
+        wait_measured_s = (
+            time.perf_counter()
+            - wait_start_s
+        )
+
+        if not completed:
+            raise RuntimeError(
+                f"Backhaul scheduler timeout "
+                f"for flow {flow_id}."
+            )
+
+        virtual_service_s = (
+            state[
+                "virtual_completion_s"
+            ]
+            - state["release_s"]
+        )
+
+        return {
+            "flow_id":
+                flow_id,
+            "virtual_service_s":
+                virtual_service_s,
+            "wait_measured_s":
+                wait_measured_s,
+        }
+
+
+    def _run(self):
+        while True:
+
+            with self.condition:
+                now_s = (
+                    time.perf_counter()
+                )
+
+                self._advance_locked(
+                    now_s
+                )
+
+                if (
+                    self.closed
+                    and not self.active
+                ):
+                    return
+
+                if not self.active:
+                    self.condition.wait()
+                    continue
+
+                active_count = len(
+                    self.active
+                )
+
+                per_flow_rate_mbps = (
+                    self.capacity_mbps
+                    / active_count
+                )
+
+                next_finish_s = min(
+                    state["remaining_mbit"]
+                    / per_flow_rate_mbps
+                    for state
+                    in self.active.values()
+                )
+
+                self.condition.wait(
+                    timeout=max(
+                        next_finish_s,
+                        1e-6,
+                    )
+                )
+
+
+    def close(self):
+        with self.condition:
+            if self.active:
+                raise RuntimeError(
+                    "Cannot close backhaul scheduler "
+                    "while flows remain active."
+                )
+
+            self.closed = True
+            self.condition.notify_all()
+
+        self.worker.join(
+            timeout=2.0
+        )
+
+        if self.worker.is_alive():
+            raise RuntimeError(
+                "Backhaul scheduler did not stop."
+            )
 
 
 def timestamp():
@@ -113,9 +423,53 @@ rcc_port = config["nodes"]["rcc"]["port"]
 
 num_uavs = config["experiment"]["num_uavs"]
 
-input_size_mbit = (
+default_input_size_mbit = float(
     config["workload"]["input_size_mbit"]
 )
+
+configured_input_sizes_mbit = (
+    config["workload"].get(
+        "input_sizes_mbit"
+    )
+)
+
+if configured_input_sizes_mbit is not None:
+
+    if (
+        len(configured_input_sizes_mbit)
+        != num_uavs
+    ):
+        raise ValueError(
+            "workload.input_sizes_mbit must "
+            "contain exactly one value per UAV."
+        )
+
+    configured_input_sizes_mbit = [
+        float(value)
+        for value
+        in configured_input_sizes_mbit
+    ]
+
+    if any(
+        value <= 0
+        for value
+        in configured_input_sizes_mbit
+    ):
+        raise ValueError(
+            "All workload.input_sizes_mbit "
+            "values must be positive."
+        )
+
+
+def input_size_for_uav(uav_id):
+
+    if configured_input_sizes_mbit is None:
+        return default_input_size_mbit
+
+    return configured_input_sizes_mbit[
+        uav_id - 1
+    ]
+
 
 mu = (
     config["workload"]["output_input_ratio"]
@@ -147,14 +501,6 @@ backhaul_fixed_delay_s = (
 
 per_flow_backhaul_rate_mbps = (
     backhaul_capacity_mbps / num_uavs
-)
-
-input_size_bits = (
-    input_size_mbit * 1e6
-)
-
-workload_cycles = (
-    input_size_bits * c_inf
 )
 
 sv_capacity_cycles_s = (
@@ -248,20 +594,35 @@ else:
     sv_compute_jobs = 0
 
 
-expected_compute_time_s = (
-    sv_compute_jobs
-    * workload_cycles
-    / sv_capacity_cycles_s
-)
+def expected_sv_compute_time_s(
+    input_size_mbit,
+):
+    workload_cycles = (
+        float(input_size_mbit)
+        * 1e6
+        * c_inf
+    )
+
+    return (
+        sv_compute_jobs
+        * workload_cycles
+        / sv_capacity_cycles_s
+    )
 
 
 def process_at_sv(workload):
     message = workload["message"]
 
+    compute_expected_s = (
+        expected_sv_compute_time_s(
+            message["input_size_mbit"]
+        )
+    )
+
     start = time.perf_counter()
 
     # Computation is intentionally model-controlled.
-    time.sleep(expected_compute_time_s)
+    time.sleep(compute_expected_s)
 
     measured = (
         time.perf_counter() - start
@@ -278,7 +639,7 @@ def process_at_sv(workload):
     message["execution_tier"] = "SV"
 
     message["compute_expected_s"] = (
-        expected_compute_time_s
+        compute_expected_s
     )
 
     message["compute_measured_s"] = (
@@ -367,24 +728,22 @@ for channel_id in range(1, num_uavs + 1):
     )
 
 
-# Rate-only emulation.
-#
-# Do NOT insert tau_bh as netem delay here because doing
-# so changes TCP dynamics and makes the fixed analytical
-# delay interact with congestion control.
-tc_result = configure_netem(
-    peer_host=rcc_host,
-    rate_mbps=backhaul_capacity_mbps,
-    delay_ms=0.0,
+# The SV -> RCC shared backhaul is controlled at the
+# application level. This avoids coupling the experiment
+# to Linux TCP/qdisc scheduling while preserving the
+# work-conserving processor-sharing semantics used by
+# the analytical model.
+backhaul_scheduler = (
+    WorkConservingBackhaulScheduler(
+        backhaul_capacity_mbps
+    )
 )
 
 print(
-    f"[SV] TC backhaul configured before START: "
-    f"interface={tc_result['interface']}, "
+    f"[SV] Work-conserving backhaul scheduler "
+    f"configured before START: "
     f"aggregate_rate="
-    f"{tc_result['rate_mbps']:.3f} Mbit/s, "
-    f"netem_delay="
-    f"{tc_result['delay_ms']:.3f} ms.",
+    f"{backhaul_capacity_mbps:.3f} Mbit/s.",
     flush=True,
 )
 
@@ -586,7 +945,7 @@ def transmit_backhaul(workload, channel):
     ] = fixed_delay_measured_s
 
     message[
-        "backhaul_transport_send_start_epoch_s"
+        "backhaul_transport_release_epoch_s"
     ] = time.time()
 
     print(
@@ -599,8 +958,52 @@ def transmit_backhaul(workload, channel):
         flush=True,
     )
 
-    # Only the actual payload transfer is governed
-    # by TCP + tc rate shaping.
+    # -----------------------------------------------------
+    # Shared backhaul service.
+    #
+    # The real-time scheduler independently implements the
+    # fluid work-conserving policy. TCP is used only to
+    # deliver the payload after the corresponding amount
+    # of shared-link service has been consumed.
+    # -----------------------------------------------------
+
+    scheduler_result = (
+        backhaul_scheduler.serve(
+            flow_id=message["uav_id"],
+            payload_mbit=payload_mbit,
+            timeout_s=BACKHAUL_ACK_TIMEOUT_S,
+        )
+    )
+
+    message[
+        "backhaul_scheduler_virtual_service_s"
+    ] = scheduler_result[
+        "virtual_service_s"
+    ]
+
+    message[
+        "backhaul_scheduler_wait_measured_s"
+    ] = scheduler_result[
+        "wait_measured_s"
+    ]
+
+    print(
+        f"[SV] UAV {message['uav_id']} "
+        f"shared backhaul service completed: "
+        f"virtual="
+        f"{scheduler_result['virtual_service_s']:.6f} s, "
+        f"measured_wait="
+        f"{scheduler_result['wait_measured_s']:.6f} s.",
+        flush=True,
+    )
+
+    message[
+        "backhaul_transport_send_start_epoch_s"
+    ] = time.time()
+
+    # Actual Docker-network delivery is unshaped and is
+    # expected to contribute only a small implementation
+    # overhead after virtual service completion.
     local_send_start = (
         time.perf_counter()
     )
@@ -874,16 +1277,40 @@ workloads.sort(
 )
 
 
-expected_access_bytes = (
-    mbit_to_bytes(input_size_mbit)
-)
-
 total_access_bytes = 0
 
 
 for workload in workloads:
     message = workload["message"]
     payload = workload["payload"]
+
+    configured_input_size_mbit = (
+        input_size_for_uav(
+            message["uav_id"]
+        )
+    )
+
+    declared_input_size_mbit = float(
+        message["input_size_mbit"]
+    )
+
+    if abs(
+        declared_input_size_mbit
+        - configured_input_size_mbit
+    ) > 1e-9:
+        raise RuntimeError(
+            f"[SV] UAV {message['uav_id']} "
+            f"declared input size "
+            f"{declared_input_size_mbit} Mbit, "
+            f"but configuration expects "
+            f"{configured_input_size_mbit} Mbit."
+        )
+
+    expected_access_bytes = (
+        mbit_to_bytes(
+            declared_input_size_mbit
+        )
+    )
 
     if len(payload) != expected_access_bytes:
         raise RuntimeError(
@@ -951,10 +1378,20 @@ if scenario == "S1":
         - batch_start
     )
 
+    expected_batch_compute_s = max(
+        float(
+            workload["message"][
+                "compute_expected_s"
+            ]
+        )
+        for workload
+        in workloads
+    )
+
     print(
         f"[SV] Batch inference completed. "
-        f"expected="
-        f"{expected_compute_time_s:.6f} s, "
+        f"expected_max="
+        f"{expected_batch_compute_s:.6f} s, "
         f"measured="
         f"{batch_measured_s:.6f} s.",
         flush=True,
@@ -1056,8 +1493,8 @@ elif scenario == "S3":
     print(
         f"[SV] SV compute share: "
         f"{len(sv_jobs)} jobs. "
-        f"Expected per-job compute="
-        f"{expected_compute_time_s:.6f} s.",
+        f"Per-workload compute time follows "
+        f"the corresponding input size.",
         flush=True,
     )
 
@@ -1134,7 +1571,7 @@ if not backhaul_already_sent:
 
 total_backhaul_bytes = sum(
     len(workload["payload"])
-    for workload in transmitted_workloads
+    for workload in workloads
 )
 
 
@@ -1145,13 +1582,22 @@ print(
 )
 
 
+backhaul_scheduler.close()
+
+print(
+    "[SV] Work-conserving backhaul scheduler "
+    "completed with no active flows.",
+    flush=True,
+)
+
+
 server.close()
 
 
 print(
     f"[SV] Completed successfully. "
     f"Delivered "
-    f"{len(transmitted_workloads)}/{num_uavs} "
+    f"{len(workloads)}/{num_uavs} "
     f"workloads with RCC ACK.",
     flush=True,
 )
